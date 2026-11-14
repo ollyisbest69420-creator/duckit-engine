@@ -61,7 +61,7 @@
             formData.append("duck_vol", duckVolInput.value);
 
             try {
-                const response = await fetch('http://127.0.0.1:8000/api/duck', {
+                const response = await fetch('/api/duck', {
                     method: 'POST',
                     body: formData
                 });
