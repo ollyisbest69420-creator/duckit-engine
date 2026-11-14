@@ -728,6 +728,7 @@
             formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
 
             try {
+                // FIXED: Completely clean fetch request with NO unwanted authorization headers
                 const response = await fetch('/api/duck', {
                     method: 'POST',
                     body: formData,
