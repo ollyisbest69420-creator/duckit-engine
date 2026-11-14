@@ -34,7 +34,7 @@ def prepare_vad_audio(input_path, output_path):
 def build_smooth_ducking_expr(timestamps, duck_vol=0.15, fade_sec=0.25, pad_sec=0.15):
     if not timestamps:
         return "1.0"
-    
+        
     padded = []
     for ts in timestamps:
         start = max(0.0, (ts['start'] / 16000.0) - pad_sec)
@@ -76,7 +76,7 @@ async def duck_audio(
     with open(music_path, "wb") as buffer:
         shutil.copyfileobj(music.file, buffer)
 
-   try:
+    try:
         prepare_vad_audio(dialogue_path, vad_temp)
 
         model, utils = torch.hub.load(
@@ -90,7 +90,7 @@ async def duck_audio(
         data, _ = sf.read(vad_temp)
         wav = torch.tensor(data, dtype=torch.float32)
         speech_timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
-
+        
         vol_filter = build_smooth_ducking_expr(speech_timestamps, duck_vol=duck_vol)
 
         input_dialogue = ffmpeg.input(dialogue_path)
