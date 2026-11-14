@@ -728,9 +728,14 @@
             formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
 
             try {
-                // PURGED: Absolutely zero header options or authorization code whatsoever.
+                // Configured headers: Add custom Authorization headers here if your backend requires them.
+                const headers = {};
+                // const token = localStorage.getItem('duckit_token');
+                // if (token) headers['Authorization'] = 'Bearer ' + token;
+
                 const response = await fetch('/api/duck', {
                     method: 'POST',
+                    headers: headers,
                     body: formData
                 });
 
