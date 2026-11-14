@@ -4,3 +4,4 @@ python-multipart==0.0.33
 torch
 ffmpeg-python
 soundfile
+packaging
