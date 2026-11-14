@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DuckIt | AI Audio Ducking SaaS</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .card { background: #1e293b; padding: 2.5rem; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 400px; text-align: center; border: 1px solid #334155; }
+        h1 { margin-bottom: 0.5rem; font-size: 1.8rem; color: #38bdf8; }
+        p { color: #94a3b8; font-size: 0.9rem; margin-bottom: 2rem; }
+        .input-group { margin-bottom: 1.2rem; text-align: left; }
+        label { display: block; font-size: 0.85rem; margin-bottom: 0.4rem; color: #cbd5e1; }
+        input[type="file"], input[type="range"] { width: 100%; background: #0f172a; border: 1px solid #475569; padding: 0.6rem; border-radius: 8px; color: #fff; box-sizing: border-box; }
+        button { background: #38bdf8; color: #0f172a; border: none; padding: 0.8rem; width: 100%; border-radius: 8px; font-weight: bold; font-size: 1rem; cursor: pointer; margin-top: 1rem; transition: background 0.2s; }
+        button:hover { background: #0ea5e9; }
+        #status { margin-top: 1rem; font-size: 0.85rem; color: #38bdf8; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>DuckIt</h1>
+        <p>AI-powered background music ducking</p>
+        
+        <div class="input-group">
+            <label>Dialogue Track (Voiceover)</label>
+            <input type="file" id="dialogueFile" accept="audio/*">
+        </div>
+
+        <div class="input-group">
+            <label>Music Track</label>
+            <input type="file" id="musicFile" accept="audio/*">
+        </div>
+
+        <div class="input-group">
+            <label>Ducking Level: <span id="volVal">15</span>%</label>
+            <input type="range" id="duckVol" min="0.01" max="0.5" step="0.01" value="0.15" oninput="document.getElementById('volVal').innerText = Math.round(this.value * 100)">
+        </div>
+
+        <button onclick="processAudio()">Duck It 🚀</button>
+        <div id="status"></div>
+    </div>
+
+    <script>
+        async function processAudio() {
+            const dialogueInput = document.getElementById('dialogueFile');
+            const musicInput = document.getElementById('musicFile');
+            const duckVolInput = document.getElementById('duckVol');
+            const statusDiv = document.getElementById('status');
+
+            if (!dialogueInput.files[0] || !musicInput.files[0]) {
+                statusDiv.innerText = "Please select both a dialogue and music file!";
+                return;
+            }
+
+            statusDiv.innerText = "Processing audio with AI (this may take a few seconds)...";
+
+            const formData = new FormData();
+            formData.append("dialogue", dialogueInput.files[0]);
+            formData.append("music", musicInput.files[0]);
+            formData.append("duck_vol", duckVolInput.value);
+
+            try {
+                const response = await fetch('http://127.0.0.1:8000/api/duck', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) throw new Error("Processing failed on server.");
+
+                const blob = await response.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = "ducked_output.mp3";
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+
+                statusDiv.innerText = "Done! Download started automatically.";
+            } catch (err) {
+                statusDiv.innerText = "Error: " + err.message;
+            }
+        }
+    </script>
+</body>
+</html>
