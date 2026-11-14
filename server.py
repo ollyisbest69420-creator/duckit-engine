@@ -76,12 +76,15 @@ async def duck_audio(
     with open(music_path, "wb") as buffer:
         shutil.copyfileobj(music.file, buffer)
 
-    try:
+   try:
         prepare_vad_audio(dialogue_path, vad_temp)
 
-        model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                      model='silero_vad',
-                                      force_reload=False)
+        model, utils = torch.hub.load(
+            repo_or_dir='snakers4/silero-vad',
+            model='silero_vad',
+            force_reload=False,
+            trust_repo=True
+        )
         (get_speech_timestamps, _, _, _, _) = utils
 
         data, _ = sf.read(vad_temp)

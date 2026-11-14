@@ -3,85 +3,806 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DuckIt | AI Audio Ducking SaaS</title>
+    <meta name="theme-color" content="#090d16">
+    <meta name="description" content="DuckIt.ai balances background music against voiceover instantly — no manual keyframes in Premiere or CapCut.">
+    <title>DuckIt.ai — Instant AI Audio Ducking</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+                        mono: ['IBM Plex Mono', 'ui-monospace', 'monospace'],
+                    },
+                    colors: {
+                        obsidian: '#090d16',
+                        ink: '#0a0f1d',
+                    },
+                },
+            },
+        };
+    </script>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-        .card { background: #1e293b; padding: 2.5rem; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); width: 400px; text-align: center; border: 1px solid #334155; }
-        h1 { margin-bottom: 0.5rem; font-size: 1.8rem; color: #38bdf8; }
-        p { color: #94a3b8; font-size: 0.9rem; margin-bottom: 2rem; }
-        .input-group { margin-bottom: 1.2rem; text-align: left; }
-        label { display: block; font-size: 0.85rem; margin-bottom: 0.4rem; color: #cbd5e1; }
-        input[type="file"], input[type="range"] { width: 100%; background: #0f172a; border: 1px solid #475569; padding: 0.6rem; border-radius: 8px; color: #fff; box-sizing: border-box; }
-        button { background: #38bdf8; color: #0f172a; border: none; padding: 0.8rem; width: 100%; border-radius: 8px; font-weight: bold; font-size: 1rem; cursor: pointer; margin-top: 1rem; transition: background 0.2s; }
-        button:hover { background: #0ea5e9; }
-        #status { margin-top: 1rem; font-size: 0.85rem; color: #38bdf8; }
+        :root { color-scheme: dark; }
+        [hidden] { display: none !important; }
+        html { background: #090d16; }
+        body {
+            font-feature-settings: "cv11", "ss01";
+            min-height: 100vh;
+        }
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                radial-gradient(ellipse 70% 45% at 50% -12%, rgba(56, 189, 248, 0.16), transparent 55%),
+                radial-gradient(ellipse 36% 32% at 100% 0%, rgba(99, 102, 241, 0.14), transparent 46%),
+                linear-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+            background-size: auto, auto, 72px 72px, 72px 72px;
+            mask-image: radial-gradient(ellipse at 50% 20%, #000 20%, transparent 78%);
+        }
+        ::selection { background: rgba(56, 189, 248, 0.28); color: #fff; }
+        ::-webkit-scrollbar { width: 10px; height: 10px; }
+        ::-webkit-scrollbar-thumb { background: #1c2740; border-radius: 999px; }
+
+        .panel {
+            background:
+                linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.02)),
+                rgba(10, 15, 29, 0.78);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow:
+                inset 0 1px 0 rgba(255, 255, 255, 0.06),
+                0 30px 80px -36px rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(22px);
+        }
+
+        .drop {
+            position: relative;
+            border: 1px dashed rgba(148, 163, 184, 0.28);
+            background: rgba(9, 13, 22, 0.55);
+            transition: border-color 160ms ease, background 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+        }
+        .drop:hover {
+            border-color: rgba(56, 189, 248, 0.55);
+            background: rgba(56, 189, 248, 0.04);
+            transform: translateY(-1px);
+        }
+        .drop.is-drag {
+            border-style: solid;
+            border-color: #38bdf8;
+            background: rgba(56, 189, 248, 0.08);
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.16);
+            transform: scale(1.01);
+        }
+        .drop.is-filled {
+            border-style: solid;
+            border-color: rgba(56, 189, 248, 0.35);
+            background: rgba(56, 189, 248, 0.05);
+        }
+        .drop.is-filled [data-index] { opacity: 0; }
+        .drop.is-invalid {
+            border-color: rgba(251, 113, 133, 0.7);
+            box-shadow: 0 0 0 4px rgba(251, 113, 133, 0.12);
+        }
+        .drop:focus-within {
+            border-color: rgba(56, 189, 248, 0.8);
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.18);
+        }
+        .drop.shake { animation: shake 0.38s ease; }
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            20% { transform: translateX(-4px); }
+            40% { transform: translateX(4px); }
+            60% { transform: translateX(-3px); }
+            80% { transform: translateX(2px); }
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 100%;
+            height: 6px;
+            border-radius: 999px;
+            background:
+                linear-gradient(90deg, #38bdf8, #6366f1) 0 / var(--p, 28.6%) 100% no-repeat,
+                rgba(255, 255, 255, 0.08);
+            outline: none;
+            cursor: pointer;
+        }
+        input[type="range"]:focus-visible {
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.22);
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            background: #fff;
+            border: 0;
+            box-shadow: 0 0 0 5px rgba(56, 189, 248, 0.22), 0 6px 16px rgba(0, 0, 0, 0.45);
+            cursor: grab;
+        }
+        input[type="range"]:active::-webkit-slider-thumb { cursor: grabbing; transform: scale(1.06); }
+        input[type="range"]::-moz-range-thumb {
+            width: 18px;
+            height: 18px;
+            border-radius: 999px;
+            background: #fff;
+            border: 0;
+            box-shadow: 0 0 0 5px rgba(56, 189, 248, 0.22), 0 6px 16px rgba(0, 0, 0, 0.45);
+            cursor: grab;
+        }
+        input[type="range"]::-moz-range-track { background: transparent; border: 0; }
+
+        .step { position: relative; }
+        .step:not(:last-child)::before {
+            content: "";
+            position: absolute;
+            left: 7px;
+            top: 18px;
+            bottom: -2px;
+            width: 1px;
+            background: rgba(255, 255, 255, 0.08);
+        }
+        .step[data-state="done"]:not(:last-child)::before { background: rgba(56, 189, 248, 0.35); }
+        .dot {
+            position: relative;
+            width: 15px;
+            height: 15px;
+            margin-top: 2px;
+            border-radius: 999px;
+            border: 1.5px solid rgba(148, 163, 184, 0.45);
+            background: transparent;
+            flex: none;
+        }
+        .step[data-state="done"] .dot {
+            border-color: #38bdf8;
+            background: #38bdf8 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath fill='none' stroke='%23090d16' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' d='M3.5 8.2 6.4 11l6.1-6.2'/%3E%3C/svg%3E") center / 11px no-repeat;
+        }
+        .step[data-state="active"] .dot {
+            border-color: #38bdf8;
+            background: #38bdf8;
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.16);
+        }
+        .step[data-state="active"] .dot::after {
+            content: "";
+            position: absolute;
+            inset: -5px;
+            border-radius: inherit;
+            border: 1px solid rgba(56, 189, 248, 0.55);
+            animation: pulse-ring 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+        }
+        .step[data-state="error"] .dot { border-color: #fb7185; background: #fb7185; }
+        .step[data-state="pending"] .label { color: #64748b; }
+        .step[data-state="active"] .label { color: #f8fafc; }
+        .step[data-state="done"] .label { color: #cbd5e1; }
+        .step[data-state="error"] .label { color: #fecdd3; }
+        @keyframes pulse-ring {
+            70%, 100% { transform: scale(1.7); opacity: 0; }
+        }
+
+        #duckBtn:active:not(:disabled) { transform: scale(0.985); }
+        #duckBtn:focus-visible {
+            outline: none;
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.28), 0 10px 40px -12px rgba(56, 189, 248, 0.85);
+        }
+        audio { width: 100%; height: 36px; }
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation: none !important;
+                transition: none !important;
+            }
+        }
     </style>
 </head>
-<body>
-    <div class="card">
-        <h1>DuckIt</h1>
-        <p>AI-powered background music ducking</p>
-        
-        <div class="input-group">
-            <label>Dialogue Track (Voiceover)</label>
-            <input type="file" id="dialogueFile" accept="audio/*">
+<body class="relative font-sans text-slate-100 antialiased">
+    <header class="sticky top-0 z-30 border-b border-white/[0.06] bg-[#090d16]/75 backdrop-blur-xl">
+        <div class="mx-auto flex h-14 max-w-5xl items-center justify-between px-5 sm:px-6">
+            <div class="flex items-center gap-3">
+                <span class="grid h-8 w-8 place-items-center rounded-lg bg-gradient-to-br from-[#38bdf8] to-[#6366f1] shadow-[0_0_24px_-4px_rgba(56,189,248,0.8)]">
+                    <svg viewBox="0 0 24 24" class="h-4 w-4 text-white" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 12h2.2l1.6-4.2L10 17l2.6-8.2L14.6 14H21"/>
+                    </svg>
+                </span>
+                <span class="relative text-[15px] font-semibold tracking-tight">
+                    <span class="absolute inset-0 bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent blur-[6px] opacity-80" aria-hidden="true">DuckIt.ai</span>
+                    <span class="relative bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent">DuckIt.ai</span>
+                </span>
+                <span class="hidden rounded-full bg-gradient-to-r from-[#38bdf8]/50 to-[#6366f1]/50 p-px sm:inline-block">
+                    <span class="block rounded-full bg-[#0b1220] px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-slate-300">v1.0 Pro</span>
+                </span>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-slate-300" id="headerStatus" aria-live="polite">
+                <span id="headerDot" class="relative grid h-2 w-2 place-items-center">
+                    <span class="absolute inline-flex h-full w-full rounded-full bg-emerald-400/70"></span>
+                    <span class="relative h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                </span>
+                <span id="headerLabel">Standby</span>
+            </div>
         </div>
+    </header>
 
-        <div class="input-group">
-            <label>Music Track</label>
-            <input type="file" id="musicFile" accept="audio/*">
-        </div>
+    <main class="relative mx-auto max-w-5xl px-5 pb-8 pt-12 sm:px-6 sm:pt-16">
+        <section class="max-w-2xl">
+            <p class="font-mono text-[11px] uppercase tracking-[0.22em] text-[#7dd3fc]">For YouTube, TikTok, and podcasts</p>
+            <h1 class="mt-3 text-[2.6rem] font-semibold leading-[1.02] tracking-[-0.04em] text-white sm:text-6xl">Instant AI Audio Ducking</h1>
+            <p class="mt-4 max-w-xl text-[15px] leading-relaxed text-slate-400 sm:text-base">
+                Balance background music against a voiceover in one pass. DuckIt finds speech and rides the bed down with smooth curves — no manual keyframes in Premiere or CapCut.
+            </p>
+            <div class="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">
+                <span>Silero VAD</span>
+                <span class="text-slate-700" aria-hidden="true">/</span>
+                <span>Smooth fades</span>
+                <span class="text-slate-700" aria-hidden="true">/</span>
+                <span>320 kbps mix</span>
+            </div>
+        </section>
 
-        <div class="input-group">
-            <label>Ducking Level: <span id="volVal">15</span>%</label>
-            <input type="range" id="duckVol" min="0.01" max="0.5" step="0.01" value="0.15" oninput="document.getElementById('volVal').innerText = Math.round(this.value * 100)">
-        </div>
+        <form id="duckForm" class="panel mt-10 rounded-2xl p-4 sm:p-6" novalidate>
+            <div class="mb-4 flex items-center justify-between">
+                <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Workspace</p>
+                <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-600">Two tracks</p>
+            </div>
 
-        <button onclick="processAudio()">Duck It 🚀</button>
-        <div id="status"></div>
-    </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+                <div class="drop min-h-[168px] rounded-xl" data-track="dialogue">
+                    <label class="flex min-h-[168px] cursor-pointer flex-col justify-between p-4">
+                        <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Voiceover or dialogue track">
+                        <div class="flex items-start justify-between">
+                            <span class="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03] text-sky-300">
+                                <i data-lucide="mic" class="h-4 w-4"></i>
+                            </span>
+                            <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 01</span>
+                        </div>
+                        <div data-empty>
+                            <p class="text-sm font-medium text-slate-100">Voiceover / Dialogue</p>
+                            <p class="mt-1 text-xs text-slate-500">Drop a track, or click to browse</p>
+                        </div>
+                        <div data-filled class="hidden min-w-0 pr-8">
+                            <p data-name class="truncate text-sm font-medium text-white"></p>
+                            <p data-meta class="mt-1 font-mono text-[11px] text-sky-300/80"></p>
+                        </div>
+                    </label>
+                    <button type="button" data-clear hidden class="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-md text-slate-400 transition hover:bg-white/10 hover:text-white" aria-label="Remove voiceover">
+                        <i data-lucide="x" class="h-3.5 w-3.5"></i>
+                    </button>
+                </div>
 
+                <div class="drop min-h-[168px] rounded-xl" data-track="music">
+                    <label class="flex min-h-[168px] cursor-pointer flex-col justify-between p-4">
+                        <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
+                        <div class="flex items-start justify-between">
+                            <span class="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03] text-indigo-300">
+                                <i data-lucide="music" class="h-4 w-4"></i>
+                            </span>
+                            <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 02</span>
+                        </div>
+                        <div data-empty>
+                            <p class="text-sm font-medium text-slate-100">Background Music</p>
+                            <p class="mt-1 text-xs text-slate-500">Drop a track, or click to browse</p>
+                        </div>
+                        <div data-filled class="hidden min-w-0 pr-8">
+                            <p data-name class="truncate text-sm font-medium text-white"></p>
+                            <p data-meta class="mt-1 font-mono text-[11px] text-indigo-300/80"></p>
+                        </div>
+                    </label>
+                    <button type="button" data-clear hidden class="absolute right-3 top-3 grid h-7 w-7 place-items-center rounded-md text-slate-400 transition hover:bg-white/10 hover:text-white" aria-label="Remove music">
+                        <i data-lucide="x" class="h-3.5 w-3.5"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="mt-6 border-t border-white/[0.06] pt-6">
+                <div class="flex items-end justify-between gap-4">
+                    <div>
+                        <label for="duckVol" class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Ducking intensity</label>
+                        <p class="mt-1 text-xs text-slate-500">Music level while the voice is present. Lower leaves the dialogue more room.</p>
+                    </div>
+                    <div class="text-right leading-none">
+                        <span id="volVal" class="text-4xl font-semibold tabular-nums tracking-tight text-white">15</span><span class="ml-0.5 text-sm text-slate-500">%</span>
+                        <p id="volHint" class="mt-1 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-500">Engine default</p>
+                    </div>
+                </div>
+                <input id="duckVol" class="mt-4" type="range" min="1" max="50" step="1" value="15" aria-valuemin="1" aria-valuemax="50" aria-valuenow="15">
+                <div class="mt-2 flex justify-between font-mono text-[10px] uppercase tracking-[0.14em] text-slate-600">
+                    <span>Lower</span>
+                    <span>Louder</span>
+                </div>
+            </div>
+
+            <div id="alert" hidden role="alert" class="mt-5 flex items-start gap-3 rounded-xl border border-rose-400/30 bg-rose-500/10 px-3.5 py-3 text-sm text-rose-100">
+                <i data-lucide="circle-alert" class="mt-0.5 h-4 w-4 shrink-0 text-rose-300"></i>
+                <p id="alertText" class="min-w-0 flex-1 leading-snug"></p>
+                <button type="button" id="alertClose" class="rounded-md p-1 text-rose-200/80 hover:bg-rose-400/10 hover:text-white" aria-label="Dismiss alert">
+                    <i data-lucide="x" class="h-3.5 w-3.5"></i>
+                </button>
+            </div>
+
+            <button id="duckBtn" type="submit" class="mt-5 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-4 py-3.5 text-sm font-semibold text-white shadow-[0_10px_40px_-12px_rgba(56,189,248,0.9)] transition hover:brightness-110 disabled:cursor-wait disabled:brightness-90">
+                <span id="btnLabel" class="inline-flex items-center gap-2">Duck It <span aria-hidden="true">🚀</span></span>
+                <span id="btnBusy" class="hidden items-center gap-2">
+                    <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" opacity="0.25"></circle>
+                        <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2" stroke-linecap="round"></path>
+                    </svg>
+                    Ducking…
+                </span>
+            </button>
+            <p class="mt-3 text-center text-[11px] text-slate-500">Mixed locally by your engine and returned as a 320 kbps MP3.</p>
+        </form>
+
+        <section class="panel mt-4 rounded-2xl" aria-labelledby="feedTitle">
+            <div class="flex items-center justify-between border-b border-white/[0.06] px-5 py-3">
+                <h2 id="feedTitle" class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Status &amp; output</h2>
+                <span id="feedBadge" class="rounded-full border border-white/10 bg-white/[0.03] px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] text-slate-400">Idle</span>
+            </div>
+            <div class="px-5 py-4">
+                <p id="feedIdle" class="text-sm text-slate-500">Waiting for a job. Add both tracks, set the ride, then duck it.</p>
+                <p id="live" class="sr-only" aria-live="polite"></p>
+                <ol id="feedSteps" hidden class="space-y-0">
+                    <li class="step flex items-start gap-3 pb-4" data-state="pending">
+                        <span class="dot"></span>
+                        <span class="label text-sm">Uploading tracks...</span>
+                        <time class="ml-auto font-mono text-[11px] text-slate-600"></time>
+                    </li>
+                    <li class="step flex items-start gap-3 pb-4" data-state="pending">
+                        <span class="dot"></span>
+                        <span class="label text-sm">Running Silero VAD neural net...</span>
+                        <time class="ml-auto font-mono text-[11px] text-slate-600"></time>
+                    </li>
+                    <li class="step flex items-start gap-3 pb-4" data-state="pending">
+                        <span class="dot"></span>
+                        <span class="label text-sm">Applying smooth ducking curves...</span>
+                        <time class="ml-auto font-mono text-[11px] text-slate-600"></time>
+                    </li>
+                    <li class="step flex items-start gap-3" data-state="pending">
+                        <span class="dot"></span>
+                        <span class="label text-sm">Done!</span>
+                        <time class="ml-auto font-mono text-[11px] text-slate-600"></time>
+                    </li>
+                </ol>
+
+                <div id="result" hidden class="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div class="mb-2 flex items-center justify-between gap-3">
+                        <div class="min-w-0">
+                            <p class="truncate text-sm font-medium text-white">ducked_output.mp3</p>
+                            <p id="resultMeta" class="font-mono text-[11px] text-slate-500"></p>
+                        </div>
+                        <a id="redownload" download="ducked_output.mp3" class="shrink-0 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-100 transition hover:border-sky-400/40 hover:text-white">Download</a>
+                    </div>
+                    <audio id="player" controls preload="metadata"></audio>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="relative mx-auto flex max-w-5xl flex-col gap-1 px-5 py-8 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <p>© 2026 DuckIt.ai</p>
+        <p>Powered by FastAPI &amp; PyTorch Silero VAD</p>
+    </footer>
+
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
     <script>
-        async function processAudio() {
-            const dialogueInput = document.getElementById('dialogueFile');
-            const musicInput = document.getElementById('musicFile');
-            const duckVolInput = document.getElementById('duckVol');
-            const statusDiv = document.getElementById('status');
+        const AUDIO_EXT = /\.(mp3|wav|wave|m4a|aac|flac|ogg|oga|aiff|aif|webm|mp4|mpeg|mpga)$/i;
+        const steps = Array.from(document.querySelectorAll('#feedSteps .step'));
+        const duckVol = document.getElementById('duckVol');
+        const volVal = document.getElementById('volVal');
+        const volHint = document.getElementById('volHint');
+        const form = document.getElementById('duckForm');
+        const duckBtn = document.getElementById('duckBtn');
+        const alertBox = document.getElementById('alert');
+        const alertText = document.getElementById('alertText');
+        const feedIdle = document.getElementById('feedIdle');
+        const feedSteps = document.getElementById('feedSteps');
+        const feedBadge = document.getElementById('feedBadge');
+        const resultBox = document.getElementById('result');
+        const resultMeta = document.getElementById('resultMeta');
+        const player = document.getElementById('player');
+        const redownload = document.getElementById('redownload');
+        const live = document.getElementById('live');
+        const headerDot = document.getElementById('headerDot');
+        const headerLabel = document.getElementById('headerLabel');
 
-            if (!dialogueInput.files[0] || !musicInput.files[0]) {
-                statusDiv.innerText = "Please select both a dialogue and music file!";
+        let busy = false;
+        let settled = false;
+        let timers = [];
+        let objectUrl = null;
+        const tracks = {};
+
+        function isAudio(file) {
+            if (!file || file.size === 0) return false;
+            if (file.type.startsWith('audio/')) return true;
+            if (file.type === 'video/mp4' || file.type === 'video/webm') return true;
+            return AUDIO_EXT.test(file.name);
+        }
+
+        function formatBytes(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / 1048576).toFixed(1) + ' MB';
+        }
+
+        function formatTime(seconds) {
+            if (!Number.isFinite(seconds) || seconds <= 0) return '';
+            const total = Math.round(seconds);
+            const m = Math.floor(total / 60);
+            const s = String(total % 60).padStart(2, '0');
+            return m + ':' + s;
+        }
+
+        function stamp() {
+            return new Date().toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        }
+
+        function notify(message) {
+            if (!message) {
+                alertBox.hidden = true;
+                alertText.textContent = '';
                 return;
             }
+            alertText.textContent = message;
+            alertBox.hidden = false;
+        }
 
-            statusDiv.innerText = "Processing audio with AI (this may take a few seconds)...";
+        function setHeader(label, tone) {
+            headerLabel.textContent = label;
+            const tones = {
+                emerald: ['bg-emerald-400/70', 'bg-emerald-400'],
+                sky: ['bg-sky-400/70', 'bg-sky-400'],
+                amber: ['bg-amber-400/70', 'bg-amber-400'],
+                rose: ['bg-rose-400/70', 'bg-rose-400'],
+            };
+            const [halo, core] = tones[tone] || tones.emerald;
+            headerDot.innerHTML =
+                '<span class="absolute inline-flex h-full w-full animate-ping rounded-full ' + halo + '"></span>' +
+                '<span class="relative h-1.5 w-1.5 rounded-full ' + core + '"></span>';
+            if (tone !== 'sky') headerDot.firstChild.classList.remove('animate-ping');
+        }
+
+        function refreshHeader() {
+            if (busy) return;
+            const ready = tracks.dialogue.file() && tracks.music.file();
+            const any = tracks.dialogue.file() || tracks.music.file();
+            if (ready) setHeader('Ready', 'sky');
+            else if (any) setHeader('Need both tracks', 'amber');
+            else setHeader('Standby', 'emerald');
+        }
+
+        function paintRange() {
+            const min = Number(duckVol.min);
+            const max = Number(duckVol.max);
+            const value = Number(duckVol.value);
+            const pct = ((value - min) / (max - min)) * 100;
+            duckVol.style.setProperty('--p', pct + '%');
+            duckVol.setAttribute('aria-valuenow', String(value));
+            volVal.textContent = String(value);
+            volHint.textContent = value === 15 ? 'Engine default' : 'Custom level';
+        }
+
+        function durationOf(file) {
+            return new Promise((resolve) => {
+                const audio = document.createElement('audio');
+                const url = URL.createObjectURL(file);
+                const done = (value) => {
+                    URL.revokeObjectURL(url);
+                    resolve(value);
+                };
+                audio.preload = 'metadata';
+                audio.onloadedmetadata = () => done(audio.duration);
+                audio.onerror = () => done(null);
+                audio.src = url;
+            });
+        }
+
+        function setupZone(root) {
+            const input = root.querySelector('input[type="file"]');
+            const empty = root.querySelector('[data-empty]');
+            const filled = root.querySelector('[data-filled]');
+            const nameEl = root.querySelector('[data-name]');
+            const metaEl = root.querySelector('[data-meta]');
+            const clearBtn = root.querySelector('[data-clear]');
+            let token = 0;
+            let current = null;
+
+            function renderEmpty() {
+                token += 1;
+                current = null;
+                empty.classList.remove('hidden');
+                filled.classList.add('hidden');
+                clearBtn.hidden = true;
+                root.classList.remove('is-filled');
+                nameEl.textContent = '';
+                nameEl.removeAttribute('title');
+                metaEl.textContent = '';
+                refreshHeader();
+            }
+
+            async function renderFile(file) {
+                const mine = ++token;
+                empty.classList.add('hidden');
+                filled.classList.remove('hidden');
+                clearBtn.hidden = false;
+                root.classList.add('is-filled');
+                root.classList.remove('is-invalid');
+                nameEl.textContent = file.name;
+                nameEl.title = file.name;
+                metaEl.textContent = formatBytes(file.size);
+                refreshHeader();
+                const dur = await durationOf(file);
+                if (mine !== token) return;
+                const clock = formatTime(dur);
+                metaEl.textContent = clock ? formatBytes(file.size) + ' · ' + clock : formatBytes(file.size);
+            }
+
+            function take(file, replace) {
+                if (busy) return;
+                if (!file) return;
+                if (!isAudio(file)) {
+                    if (replace) {
+                        input.value = '';
+                        renderEmpty();
+                    }
+                    root.classList.add('is-invalid', 'shake');
+                    notify(file.size === 0 ? 'That file is empty.' : 'Use an audio file — MP3, WAV, M4A, FLAC, or similar.');
+                    return;
+                }
+                try {
+                    const bag = new DataTransfer();
+                    bag.items.add(file);
+                    input.files = bag.files;
+                } catch (error) {
+                    input.value = '';
+                }
+                current = file;
+                notify(null);
+                renderFile(file);
+            }
+
+            input.addEventListener('change', () => {
+                if (input.files && input.files[0]) take(input.files[0], true);
+            });
+            clearBtn.addEventListener('click', (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                if (busy) return;
+                input.value = '';
+                renderEmpty();
+            });
+            ['dragenter', 'dragover'].forEach((type) => {
+                root.addEventListener(type, (event) => {
+                    event.preventDefault();
+                    if (!busy) root.classList.add('is-drag');
+                });
+            });
+            root.addEventListener('dragleave', (event) => {
+                if (!root.contains(event.relatedTarget)) root.classList.remove('is-drag');
+            });
+            root.addEventListener('drop', (event) => {
+                event.preventDefault();
+                root.classList.remove('is-drag');
+                const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+                if (file) take(file, false);
+            });
+            root.addEventListener('animationend', () => root.classList.remove('shake'));
+
+            return {
+                root,
+                file: () => current,
+                shake() {
+                    root.classList.remove('shake');
+                    void root.offsetWidth;
+                    root.classList.add('is-invalid', 'shake');
+                },
+            };
+        }
+
+        document.querySelectorAll('[data-track]').forEach((zone) => {
+            tracks[zone.dataset.track] = setupZone(zone);
+        });
+
+        ['dragover', 'drop'].forEach((type) => {
+            window.addEventListener(type, (event) => event.preventDefault());
+        });
+
+        duckVol.addEventListener('input', paintRange);
+        document.getElementById('alertClose').addEventListener('click', () => notify(null));
+        paintRange();
+
+        function setBadge(text, kind) {
+            feedBadge.textContent = text;
+            const styles = {
+                idle: 'border-white/10 bg-white/[0.03] text-slate-400',
+                live: 'border-sky-400/30 bg-sky-400/10 text-sky-200',
+                ok: 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200',
+                err: 'border-rose-400/30 bg-rose-400/10 text-rose-200',
+            };
+            feedBadge.className = 'rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.14em] ' + (styles[kind] || styles.idle);
+        }
+
+        function resetSteps() {
+            steps.forEach((step) => {
+                step.dataset.state = 'pending';
+                step.querySelector('time').textContent = '';
+            });
+        }
+
+        function activate(index) {
+            steps.forEach((step, i) => {
+                if (i < index) step.dataset.state = 'done';
+                else if (i === index) {
+                    step.dataset.state = 'active';
+                    const time = step.querySelector('time');
+                    if (!time.textContent) time.textContent = stamp();
+                } else step.dataset.state = 'pending';
+            });
+            const label = steps[index].querySelector('.label').textContent;
+            live.textContent = label;
+        }
+
+        function finishSteps() {
+            const now = stamp();
+            steps.forEach((step) => {
+                step.dataset.state = 'done';
+                const time = step.querySelector('time');
+                if (!time.textContent) time.textContent = now;
+            });
+            live.textContent = 'Done!';
+        }
+
+        function failSteps() {
+            const active = steps.find((step) => step.dataset.state === 'active') || steps[0];
+            steps.forEach((step) => {
+                if (step === active) step.dataset.state = 'error';
+                else if (step.dataset.state === 'active') step.dataset.state = 'pending';
+            });
+            const time = active.querySelector('time');
+            if (!time.textContent) time.textContent = stamp();
+        }
+
+        function clearTimers() {
+            timers.forEach(clearTimeout);
+            timers = [];
+        }
+
+        function later(fn, ms) {
+            timers.push(setTimeout(fn, ms));
+        }
+
+        function setBusy(on) {
+            busy = on;
+            duckBtn.disabled = on;
+            document.getElementById('btnLabel').classList.toggle('hidden', on);
+            document.getElementById('btnBusy').classList.toggle('hidden', !on);
+            document.getElementById('btnBusy').classList.toggle('inline-flex', on);
+        }
+
+        function formatDetail(detail) {
+            if (typeof detail === 'string' && detail.trim()) return detail;
+            if (Array.isArray(detail)) {
+                const text = detail.map((item) => item.msg || '').filter(Boolean).join(' ');
+                if (text) return text;
+            }
+            return 'The server could not duck those tracks.';
+        }
+
+        function triggerDownload(url) {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'ducked_output.mp3';
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        }
+
+        async function processAudio(dialogue, music) {
+            settled = false;
+            clearTimers();
+            notify(null);
+            setBusy(true);
+            setHeader('Processing', 'sky');
+            setBadge('Live', 'live');
+            feedIdle.hidden = true;
+            feedSteps.hidden = false;
+            resultBox.hidden = true;
+            if (objectUrl) {
+                URL.revokeObjectURL(objectUrl);
+                objectUrl = null;
+                player.removeAttribute('src');
+                player.load();
+            }
+            resetSteps();
+            activate(0);
+
+            later(() => { if (!settled) activate(1); }, 700);
+            later(() => { if (!settled) activate(2); }, 1600);
 
             const formData = new FormData();
-            formData.append("dialogue", dialogueInput.files[0]);
-            formData.append("music", musicInput.files[0]);
-            formData.append("duck_vol", duckVolInput.value);
+            formData.append('dialogue', dialogue);
+            formData.append('music', music);
+            formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
 
             try {
                 const response = await fetch('/api/duck', {
                     method: 'POST',
-                    body: formData
+                    body: formData,
                 });
 
-                if (!response.ok) throw new Error("Processing failed on server.");
+                if (!response.ok) {
+                    let detail = 'Processing failed on the server.';
+                    try {
+                        const data = await response.json();
+                        detail = formatDetail(data.detail);
+                    } catch (parseError) {
+                        detail = 'Processing failed on the server (' + response.status + ').';
+                    }
+                    throw new Error(detail);
+                }
+
+                const contentType = response.headers.get('content-type') || '';
+                if (contentType.includes('application/json')) {
+                    const data = await response.json();
+                    throw new Error(formatDetail(data.detail));
+                }
 
                 const blob = await response.blob();
-                const url = window.URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = "ducked_output.mp3";
-                document.body.appendChild(a);
-                a.click();
-                a.remove();
+                if (!blob || blob.size === 0) throw new Error('The engine returned an empty file.');
 
-                statusDiv.innerText = "Done! Download started automatically.";
-            } catch (err) {
-                statusDiv.innerText = "Error: " + err.message;
+                settled = true;
+                clearTimers();
+                finishSteps();
+                setBadge('Complete', 'ok');
+                setHeader('Complete', 'emerald');
+
+                objectUrl = URL.createObjectURL(blob);
+                player.src = objectUrl;
+                redownload.href = objectUrl;
+                resultMeta.textContent = formatBytes(blob.size) + ' · 320 kbps';
+                resultBox.hidden = false;
+                triggerDownload(objectUrl);
+            } catch (error) {
+                settled = true;
+                clearTimers();
+                if (steps.every((step) => step.dataset.state === 'pending')) activate(0);
+                failSteps();
+                setBadge('Failed', 'err');
+                setHeader('Error', 'rose');
+                const message = error && error.message && error.message !== 'Failed to fetch'
+                    ? error.message
+                    : 'Could not reach the DuckIt engine. Check that the server is running and try again.';
+                notify(message);
+                live.textContent = message;
+            } finally {
+                setBusy(false);
+                if (headerLabel.textContent === 'Processing') refreshHeader();
             }
         }
+
+        form.addEventListener('submit', (event) => {
+            event.preventDefault();
+            if (busy) return;
+            const dialogue = tracks.dialogue.file();
+            const music = tracks.music.file();
+            if (!dialogue || !music) {
+                if (!dialogue) tracks.dialogue.shake();
+                if (!music) tracks.music.shake();
+                notify(!dialogue && !music
+                    ? 'Add a voiceover and a music track before ducking.'
+                    : !dialogue
+                        ? 'The voiceover track is still missing.'
+                        : 'The background music track is still missing.');
+                return;
+            }
+            processAudio(dialogue, music);
+        });
+
+        if (window.lucide) lucide.createIcons();
+        refreshHeader();
     </script>
 </body>
 </html>
