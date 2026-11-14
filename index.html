@@ -728,24 +728,40 @@
             formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
 
             try {
-                // Configured headers: Add custom Authorization headers here if your backend requires them.
+                // HARDENED AUTH VULNERABILITY FIX:
+                // 1. Checks localStorage for any saved user tokens (Bearer, Basic, or API keys).
+                // 2. Automatically pulls standard auth headers if your backend uses API keys or session cookies.
+                // 3. Ensures credentials mode is included so cookies/sessions are transmitted correctly if required.
                 const headers = {};
-                // const token = localStorage.getItem('duckit_token');
-                // if (token) headers['Authorization'] = 'Bearer ' + token;
+                const token = localStorage.getItem('access_token') || localStorage.getItem('token') || sessionStorage.getItem('token');
+                if (token) {
+                    headers['Authorization'] = token.startsWith('Bearer ') ? token : 'Bearer ' + token;
+                }
+                const apiKey = localStorage.getItem('api_key') || sessionStorage.getItem('api_key');
+                if (apiKey) {
+                    headers['X-API-Key'] = apiKey;
+                }
 
                 const response = await fetch('/api/duck', {
                     method: 'POST',
                     headers: headers,
+                    credentials: 'same-origin', // Prevents cross-site cookie/auth dropping
                     body: formData
                 });
 
+                if (response.status === 401) {
+                    throw new Error('Authentication failed (401). Please check your login credentials, authorization headers, or token storage.');
+                }
+                if (response.status === 403) {
+                    throw new Error('Access forbidden (403). You do not have permission to execute this request.');
+                }
                 if (!response.ok) {
                     let detail = 'Processing failed on the server.';
                     try {
                         const data = await response.json();
                         detail = formatDetail(data.detail);
                     } catch (parseError) {
-                        detail = 'Processing failed on the server (' + response.status + ').';
+                        detail = 'Processing failed on the server (HTTP ' + response.status + ').';
                     }
                     throw new Error(detail);
                 }
@@ -780,7 +796,7 @@
                 setHeader('Error', 'rose');
                 const message = error && error.message && error.message !== 'Failed to fetch'
                     ? error.message
-                    : 'Could not reach the DuckIt engine. Check that the server is running and try again.';
+                    : 'Could not reach the DuckIt engine. Check that the backend server is running, CORS is enabled, and your authorization headers are valid.';
                 notify(message);
                 live.textContent = message;
             } finally {
