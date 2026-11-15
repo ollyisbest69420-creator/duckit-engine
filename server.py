@@ -1,5 +1,6 @@
 import os
 import shutil
+import uuid
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,13 +24,22 @@ OUTPUT_DIR = "outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+@app.get("/api/health")
+def health_check():
+    """Keeps the service active and verifies server health."""
+    return {"status": "online", "engine": "ready"}
+
 def prepare_vad_audio(input_path, output_path):
-    (
-        ffmpeg
-        .input(input_path)
-        .output(output_path, ar=16000, ac=1, format='wav')
-        .run(overwrite_output=True, quiet=True)
-    )
+    try:
+        (
+            ffmpeg
+            .input(input_path)
+            .output(output_path, ar=16000, ac=1, format='wav')
+            .run(overwrite_output=True, quiet=True)
+        )
+    except ffmpeg.Error as e:
+        err_msg = e.stderr.decode('utf8') if e.stderr else str(e)
+        raise RuntimeError(f"FFmpeg VAD prep failed: {err_msg}")
 
 def build_smooth_ducking_expr(timestamps, duck_vol=0.15, fade_sec=0.25, pad_sec=0.15):
     if not timestamps:
@@ -44,18 +54,19 @@ def build_smooth_ducking_expr(timestamps, duck_vol=0.15, fade_sec=0.25, pad_sec=
         else:
             padded.append([start, end])
             
-    drop = 1.0 - duck_vol
+    drop = max(0.0, min(1.0, 1.0 - duck_vol))
     expr_parts = ["1.0"]
+    fade_sec = max(0.01, fade_sec) # Prevent division by zero
     
     for start, end in padded:
         fade_in_start = max(0.0, start - fade_sec)
         fade_out_end = end + fade_sec
         
-        ramp_down = f"if(between(t,{fade_in_start:.3f},{start:.3f}), {drop:.3f}*((t-{fade_in_start:.3f})/{fade_sec:.3f}), 0)"
-        hold = f"if(between(t,{start:.3f},{end:.3f}), {drop:.3f}, 0)"
-        ramp_up = f"if(between(t,{end:.3f},{fade_out_end:.3f}), {drop:.3f}*(1-((t-{end:.3f})/{fade_sec:.3f})), 0)"
+        ramp_down = f"if(between(t,{fade_in_start:.3f},{start:.3f}), 1.0-({drop:.3f}*((t-{fade_in_start:.3f})/{fade_sec:.3f})), 0)"
+        hold = f"if(between(t,{start:.3f},{end:.3f}), {duck_vol:.3f}, 0)"
+        ramp_up = f"if(between(t,{end:.3f},{fade_out_end:.3f}), {duck_vol:.3f}+({drop:.3f}*((t-{end:.3f})/{fade_sec:.3f})), 0)"
         
-        expr_parts.append(f"-({ramp_down}+{hold}+{ramp_up})")
+        expr_parts.append(f"+{ramp_down}+{hold}+{ramp_up}")
         
     return "".join(expr_parts)
 
@@ -65,20 +76,27 @@ async def duck_audio(
     music: UploadFile = File(...),
     duck_vol: float = Form(0.15)
 ):
-    dialogue_path = os.path.join(UPLOAD_DIR, dialogue.filename)
-    music_path = os.path.join(UPLOAD_DIR, music.filename)
-    output_filename = f"ducked_{os.path.splitext(dialogue.filename)[0]}.mp3"
-    output_path = os.path.join(OUTPUT_DIR, output_filename)
-    vad_temp = os.path.join(UPLOAD_DIR, "temp_vad.wav")
+    # Generate unique run ID to prevent concurrent file collision/overwrite
+    unique_id = str(uuid.uuid4())[:8]
+    diag_ext = os.path.splitext(dialogue.filename)[1] or ".mp3"
+    music_ext = os.path.splitext(music.filename)[1] or ".mp3"
 
-    with open(dialogue_path, "wb") as buffer:
-        shutil.copyfileobj(dialogue.file, buffer)
-    with open(music_path, "wb") as buffer:
-        shutil.copyfileobj(music.file, buffer)
+    dialogue_path = os.path.join(UPLOAD_DIR, f"diag_{unique_id}{diag_ext}")
+    music_path = os.path.join(UPLOAD_DIR, f"music_{unique_id}{music_ext}")
+    output_filename = f"ducked_{os.path.splitext(dialogue.filename)[0]}_{unique_id}.mp3"
+    output_path = os.path.join(OUTPUT_DIR, output_filename)
+    vad_temp = os.path.join(UPLOAD_DIR, f"temp_vad_{unique_id}.wav")
 
     try:
+        with open(dialogue_path, "wb") as buffer:
+            shutil.copyfileobj(dialogue.file, buffer)
+        with open(music_path, "wb") as buffer:
+            shutil.copyfileobj(music.file, buffer)
+
         prepare_vad_audio(dialogue_path, vad_temp)
 
+        # Force single thread for torch to prevent CPU thrashing during web requests
+        torch.set_num_threads(1)
         model, utils = torch.hub.load(
             repo_or_dir='snakers4/silero-vad',
             model='silero_vad',
@@ -102,13 +120,25 @@ async def duck_audio(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        if os.path.exists(vad_temp):
-            os.remove(vad_temp)
+        # Cleanup temporary input files and vad temp to save disk space
+        for p in [dialogue_path, music_path, vad_temp]:
+            if os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+    if not os.path.exists(output_path):
+        raise HTTPException(status_code=500, detail="Processing completed but output file missing.")
 
     return FileResponse(output_path, media_type="audio/mpeg", filename=output_filename)
 
-app.mount("/", StaticFiles(directory=".", html=True), name="static")
+# Mount static files safely (using /static or keeping root fallback correctly)
+if os.path.exists("index.html") or any(f.endswith(".html") for f in os.listdir(".")):
+    app.mount("/", StaticFiles(directory=".", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+    import os
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("server:app", host="0.0.0.0", port=port)
