@@ -283,23 +283,6 @@
                     </button>
                 </div>
 
-            <div class="mb-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#090d16]/75 px-3.5 py-2.5">
-                <div class="flex items-center gap-2">
-                    <span class="grid h-7 w-7 place-items-center rounded-lg bg-indigo-500/10 text-indigo-300">🎵</span>
-                    <div>
-                        <p class="text-xs font-medium text-slate-200">No background music handy?</p>
-                        <p class="text-[11px] text-slate-500">Pick a generated pro beat to test instantly</p>
-                    </div>
-                </div>
-                <select id="stockMusicSelect" class="rounded-lg border border-white/10 bg-[#0a0f1d] px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-400 focus:outline-none">
-                    <option value="">Choose a stock beat...</option>
-                    <option value="lofi">Lo-Fi Chill (80 BPM)</option>
-                    <option value="phonk">Phonk Bounce (130 BPM)</option>
-                    <option value="ambient">Cinematic Ambient (Pad)</option>
-                    <option value="synthwave">Synthwave Groove (115 BPM)</option>
-                    <option value="acoustic">Acoustic Chord Bed</option>
-                </select>
-            </div>
                 <div class="drop min-h-[168px] rounded-xl" data-track="music">
                     <label class="flex min-h-[168px] cursor-pointer flex-col justify-between p-4">
                         <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
@@ -307,8 +290,19 @@
                             <span class="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03] text-indigo-300">
                                 <i data-lucide="music" class="h-4 w-4"></i>
                             </span>
-                            <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 02</span>
+                            <div class="flex items-center gap-2" data-stock-container>
+                                <select id="stockMusicSelect" class="rounded-lg border border-white/10 bg-[#0a0f1d] px-2 py-1 font-mono text-[11px] text-slate-200 focus:border-sky-400 focus:outline-none" onclick="event.stopPropagation()">
+                                    <option value="">Stock beat…</option>
+                                    <option value="lofi">Lo-Fi Chill (80 BPM)</option>
+                                    <option value="phonk">Phonk Bounce (130 BPM)</option>
+                                    <option value="ambient">Cinematic Ambient (Pad)</option>
+                                    <option value="synthwave">Synthwave Groove (115 BPM)</option>
+                                    <option value="acoustic">Acoustic Chord Bed</option>
+                                </select>
+                                <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 02</span>
+                            </div>
                         </div>
+                        <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
                         <div data-empty>
                             <p class="text-sm font-medium text-slate-100">Background Music</p>
                             <p class="mt-1 text-xs text-slate-500">Drop a track, or click to browse</p>
@@ -604,10 +598,40 @@
                 nameEl.textContent = '';
                 nameEl.removeAttribute('title');
                 metaEl.textContent = '';
+                const stockSelect = root.querySelector('#stockMusicSelect');
+                if (stockSelect) { stockSelect.value = ''; stockSelect.classList.remove('hidden'); }
+                refreshHeader();
+            }
+                token += 1;
+                current = null;
+                empty.classList.remove('hidden');
+                filled.classList.add('hidden');
+                clearBtn.hidden = true;
+                root.classList.remove('is-filled');
+                nameEl.textContent = '';
+                nameEl.removeAttribute('title');
+                metaEl.textContent = '';
                 refreshHeader();
             }
 
             async function renderFile(file) {
+                const mine = ++token;
+                empty.classList.add('hidden');
+                filled.classList.remove('hidden');
+                clearBtn.hidden = false;
+                root.classList.add('is-filled');
+                root.classList.remove('is-invalid');
+                nameEl.textContent = file.name;
+                nameEl.title = file.name;
+                metaEl.textContent = formatBytes(file.size);
+                const stockSelect = root.querySelector('#stockMusicSelect');
+                if (stockSelect) stockSelect.classList.add('hidden');
+                refreshHeader();
+                const dur = await durationOf(file);
+                if (mine !== token) return;
+                const clock = formatTime(dur);
+                metaEl.textContent = clock ? formatBytes(file.size) + ' · ' + clock : formatBytes(file.size);
+            }
                 const mine = ++token;
                 empty.classList.add('hidden');
                 filled.classList.remove('hidden');
@@ -1159,6 +1183,31 @@
         if (abDuckedBtn && abOriginalBtn) {
             abDuckedBtn.addEventListener('click', () => setAbMode('ducked'));
             abOriginalBtn.addEventListener('click', async () => {
+                if (!rawOriginalUrl) {
+                    const dialogue = tracks.dialogue ? tracks.dialogue.file() : null;
+                    const music = tracks.music ? tracks.music.file() : null;
+                    if (dialogue && music) {
+                        try {
+                            const dArr = new Uint8Array(await dialogue.arrayBuffer());
+                            const mArr = new Uint8Array(await music.arrayBuffer());
+                            const actx = new (window.AudioContext || window.webkitAudioContext)();
+                            const dBuf = await actx.decodeAudioData(dArr.buffer);
+                            const mBuf = await actx.decodeAudioData(mArr.buffer);
+                            const dur = Math.max(dBuf.duration, mBuf.duration);
+                            const octx = new OfflineAudioContext(2, 44100 * dur, 44100);
+                            const s1 = octx.createBufferSource(); s1.buffer = dBuf; s1.connect(octx.destination);
+                            const s2 = octx.createBufferSource(); s2.buffer = mBuf; s2.connect(octx.destination);
+                            s1.start(0); s2.start(0);
+                            const res = await octx.startRendering();
+                            rawOriginalUrl = URL.createObjectURL(bufferToWav(res));
+                        } catch (err) {
+                            notify('Could not generate original raw mix: ' + err.message);
+                            return;
+                        }
+                    }
+                }
+                setAbMode('original');
+            });
                 if (!rawOriginalUrl) {
                     const dialogue = tracks.dialogue ? tracks.dialogue.file() : null;
                     const music = tracks.music ? tracks.music.file() : null;
