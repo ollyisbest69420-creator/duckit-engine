@@ -561,7 +561,6 @@
                 trialText.className = 'text-sky-300';
             }
         }
-        // renderTrialMeter moved to top-level scope
 
         function durationOf(file) {
             return new Promise((resolve) => {
@@ -602,17 +601,6 @@
                 if (stockSelect) { stockSelect.value = ''; stockSelect.classList.remove('hidden'); }
                 refreshHeader();
             }
-                token += 1;
-                current = null;
-                empty.classList.remove('hidden');
-                filled.classList.add('hidden');
-                clearBtn.hidden = true;
-                root.classList.remove('is-filled');
-                nameEl.textContent = '';
-                nameEl.removeAttribute('title');
-                metaEl.textContent = '';
-                refreshHeader();
-            }
 
             async function renderFile(file) {
                 const mine = ++token;
@@ -626,21 +614,6 @@
                 metaEl.textContent = formatBytes(file.size);
                 const stockSelect = root.querySelector('#stockMusicSelect');
                 if (stockSelect) stockSelect.classList.add('hidden');
-                refreshHeader();
-                const dur = await durationOf(file);
-                if (mine !== token) return;
-                const clock = formatTime(dur);
-                metaEl.textContent = clock ? formatBytes(file.size) + ' · ' + clock : formatBytes(file.size);
-            }
-                const mine = ++token;
-                empty.classList.add('hidden');
-                filled.classList.remove('hidden');
-                clearBtn.hidden = false;
-                root.classList.add('is-filled');
-                root.classList.remove('is-invalid');
-                nameEl.textContent = file.name;
-                nameEl.title = file.name;
-                metaEl.textContent = formatBytes(file.size);
                 refreshHeader();
                 const dur = await durationOf(file);
                 if (mine !== token) return;
@@ -838,7 +811,6 @@
             } catch (_) {
                 // The app itself remains usable; server errors are shown when submitting.
             }
-                renderTrialMeter();
         }
 
         async function goToBilling() {
@@ -983,7 +955,6 @@
                 if (!billing.pro && clipDur > 0) {
                     usedTrialSeconds = typeof job.used_seconds === 'number' ? job.used_seconds : usedTrialSeconds + Math.round(clipDur);
                     localStorage.setItem('duckit_trial_used_sec', String(usedTrialSeconds));
-                    renderTrialMeter();
                     renderTrialMeter();
                 }
                 await downloadOutput(true);
@@ -1208,29 +1179,8 @@
                 }
                 setAbMode('original');
             });
-                if (!rawOriginalUrl) {
-                    const dialogue = tracks.dialogue ? tracks.dialogue.file() : null;
-                    const music = tracks.music ? tracks.music.file() : null;
-                    if (dialogue && music) {
-                        try {
-                            const dArr = new Uint8Array(await dialogue.arrayBuffer());
-                            const mArr = new Uint8Array(await music.arrayBuffer());
-                            const actx = new (window.AudioContext || window.webkitAudioContext)();
-                            const dBuf = await actx.decodeAudioData(dArr.buffer);
-                            const mBuf = await actx.decodeAudioData(mArr.buffer);
-                            const dur = Math.max(dBuf.duration, mBuf.duration);
-                            const octx = new OfflineAudioContext(2, 44100 * dur, 44100);
-                            const s1 = octx.createBufferSource(); s1.buffer = dBuf; s1.connect(octx.destination);
                             const s2 = octx.createBufferSource(); s2.buffer = mBuf; s2.connect(octx.destination);
                             s1.start(0); s2.start(0);
-                            const res = await octx.startRendering();
-                            rawOriginalUrl = URL.createObjectURL(bufferToWav(res));
-                        } catch (_) {}
-                    }
-                }
-                setAbMode('original');
-            });
-        }
             notify('Payment received. Activating Pro…');
             setTimeout(refreshBilling, 1200);
         } else {
