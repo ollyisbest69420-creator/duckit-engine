@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#090d16">
     <meta name="description" content="DuckIt.ai balances background music against voiceover instantly — no manual keyframes in Premiere or CapCut.">
     <title>DuckIt.ai — Instant AI Audio Ducking</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%2338bdf8'/%3E%3Cstop offset='100%25' stop-color='%236366f1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M6 16h2.8l2-5.4L14.8 22.5l3.2-10.5L20.5 18.5H26' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%2338bdf8'/%3E%3Cstop offset='100%25' stop-color='%236366f1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M6 16h2.8l2-5.4L14.8 22.5l3.2-10.5L20.5 18.5H26' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -283,6 +283,23 @@
                     </button>
                 </div>
 
+            <div class="mb-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#090d16]/75 px-3.5 py-2.5">
+                <div class="flex items-center gap-2">
+                    <span class="grid h-7 w-7 place-items-center rounded-lg bg-indigo-500/10 text-indigo-300">🎵</span>
+                    <div>
+                        <p class="text-xs font-medium text-slate-200">No background music handy?</p>
+                        <p class="text-[11px] text-slate-500">Pick a generated pro beat to test instantly</p>
+                    </div>
+                </div>
+                <select id="stockMusicSelect" class="rounded-lg border border-white/10 bg-[#0a0f1d] px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-400 focus:outline-none">
+                    <option value="">Choose a stock beat...</option>
+                    <option value="lofi">Lo-Fi Chill (80 BPM)</option>
+                    <option value="phonk">Phonk Bounce (130 BPM)</option>
+                    <option value="ambient">Cinematic Ambient (Pad)</option>
+                    <option value="synthwave">Synthwave Groove (115 BPM)</option>
+                    <option value="acoustic">Acoustic Chord Bed</option>
+                </select>
+            </div>
                 <div class="drop min-h-[168px] rounded-xl" data-track="music">
                     <label class="flex min-h-[168px] cursor-pointer flex-col justify-between p-4">
                         <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
@@ -389,11 +406,20 @@
                 </ol>
 
                 <div id="result" hidden class="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
-                    <div class="mb-2 flex items-center justify-between gap-3">
+                    <div class="mb-2.5 flex flex-wrap items-center justify-between gap-3">
                         <div class="min-w-0">
-                            <p class="truncate text-sm font-medium text-white">ducked_output.mp3</p>
+                            <p id="resultTitle" class="truncate text-sm font-medium text-white">ducked_output.mp3</p>
                             <p id="resultMeta" class="font-mono text-[11px] text-slate-500"></p>
                         </div>
+                        <div class="flex items-center gap-2">
+                            <div class="inline-flex rounded-lg border border-white/10 bg-[#090d16] p-0.5 font-mono text-[10px] uppercase tracking-[0.12em]" role="group" aria-label="Audio comparison">
+                                <button id="abDucked" type="button" class="rounded-md bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-2.5 py-1 font-semibold text-white transition">
+                                    Ducked
+                                </button>
+                                <button id="abOriginal" type="button" class="rounded-md px-2.5 py-1 text-slate-400 transition hover:text-white">
+                                    Original
+                                </button>
+                            </div>
                         <button id="redownload" type="button" class="shrink-0 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-100 transition hover:border-sky-400/40 hover:text-white">
                             Download
                         </button>
@@ -516,6 +542,8 @@
             duckVol.setAttribute('aria-valuenow', String(value));
             volVal.textContent = String(value);
             volHint.textContent = value === 15 ? 'Engine default' : 'Custom level';
+        }
+
         function renderTrialMeter() {
             if (billing.pro) {
                 trialMeter.hidden = true;
@@ -539,7 +567,7 @@
                 trialText.className = 'text-sky-300';
             }
         }
-        }
+        // renderTrialMeter moved to top-level scope
 
         function durationOf(file) {
             return new Promise((resolve) => {
@@ -932,6 +960,7 @@
                     usedTrialSeconds = typeof job.used_seconds === 'number' ? job.used_seconds : usedTrialSeconds + Math.round(clipDur);
                     localStorage.setItem('duckit_trial_used_sec', String(usedTrialSeconds));
                     renderTrialMeter();
+                    renderTrialMeter();
                 }
                 await downloadOutput(true);
             } catch (error) {
@@ -976,6 +1005,183 @@
 
         const checkoutState = new URLSearchParams(window.location.search).get('checkout');
         if (checkoutState === 'success') {
+
+        // Stock music audio generator using Web Audio API
+        const stockMusicSelect = document.getElementById('stockMusicSelect');
+        if (stockMusicSelect) {
+            stockMusicSelect.addEventListener('change', async (e) => {
+                const val = e.target.value;
+                if (!val) return;
+                try {
+                    const file = await generateStockBeat(val);
+                    if (tracks.music && tracks.music.take) {
+                        tracks.music.take(file, true);
+                    }
+                } catch (err) {
+                    notify('Could not generate stock beat: ' + err.message);
+                }
+            });
+        }
+
+        async function generateStockBeat(style) {
+            const sampleRate = 44100;
+            const duration = 10;
+            const offlineCtx = new OfflineAudioContext(2, sampleRate * duration, sampleRate);
+
+            if (style === 'lofi') {
+                const bpm = 80;
+                const stepTime = 60 / bpm / 4;
+                for (let t = 0; t < duration; t += stepTime * 16) {
+                    [0, 2.5, 3.5, 6, 8, 10.5, 12, 14].forEach(step => {
+                        const osc = offlineCtx.createOscillator();
+                        const gain = offlineCtx.createGain();
+                        osc.type = 'sine';
+                        osc.frequency.setValueAtTime(60, t + step * stepTime);
+                        osc.frequency.exponentialRampToValueAtTime(30, t + step * stepTime + 0.15);
+                        gain.gain.setValueAtTime(0.4, t + step * stepTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, t + step * stepTime + 0.2);
+                        osc.connect(gain); gain.connect(offlineCtx.destination);
+                        osc.start(t + step * stepTime); osc.stop(t + step * stepTime + 0.25);
+                    });
+                }
+            } else if (style === 'phonk') {
+                const bpm = 130;
+                const stepTime = 60 / bpm / 4;
+                for (let t = 0; t < duration; t += stepTime * 16) {
+                    [0, 3, 4, 8, 10, 12].forEach(step => {
+                        const osc = offlineCtx.createOscillator();
+                        const gain = offlineCtx.createGain();
+                        osc.type = 'triangle';
+                        osc.frequency.setValueAtTime(80, t + step * stepTime);
+                        osc.frequency.exponentialRampToValueAtTime(40, t + step * stepTime + 0.2);
+                        gain.gain.setValueAtTime(0.6, t + step * stepTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, t + step * stepTime + 0.25);
+                        osc.connect(gain); gain.connect(offlineCtx.destination);
+                        osc.start(t + step * stepTime); osc.stop(t + step * stepTime + 0.3);
+                    });
+                }
+            } else if (style === 'synthwave') {
+                const bpm = 115;
+                const stepTime = 60 / bpm / 4;
+                for (let t = 0; t < duration; t += stepTime * 16) {
+                    [0, 4, 8, 12].forEach(step => {
+                        const osc = offlineCtx.createOscillator();
+                        const gain = offlineCtx.createGain();
+                        osc.type = 'sawtooth';
+                        osc.frequency.setValueAtTime(110, t + step * stepTime);
+                        gain.gain.setValueAtTime(0.3, t + step * stepTime);
+                        gain.gain.exponentialRampToValueAtTime(0.001, t + step * stepTime + 0.3);
+                        osc.connect(gain); gain.connect(offlineCtx.destination);
+                        osc.start(t + step * stepTime); osc.stop(t + step * stepTime + 0.35);
+                    });
+                }
+            } else {
+                const freqs = style === 'acoustic' ? [261.63, 329.63, 392.00] : [130.81, 164.81, 196.00];
+                freqs.forEach(f => {
+                    const osc = offlineCtx.createOscillator();
+                    const gain = offlineCtx.createGain();
+                    osc.type = style === 'acoustic' ? 'triangle' : 'sine';
+                    osc.frequency.value = f;
+                    gain.gain.setValueAtTime(0.15, 0);
+                    gain.gain.linearRampToValueAtTime(0.001, duration);
+                    osc.connect(gain); gain.connect(offlineCtx.destination);
+                    osc.start(0); osc.stop(duration);
+                });
+            }
+
+            const renderedBuffer = await offlineCtx.startRendering();
+            const wavBlob = bufferToWav(renderedBuffer);
+            const filename = style + '_beat.wav';
+            return new File([wavBlob], filename, { type: 'audio/wav' });
+        }
+
+        function bufferToWav(buffer) {
+            const numChannels = buffer.numberOfChannels;
+            const sampleRate = buffer.sampleRate;
+            const format = 1;
+            const bitDepth = 16;
+            const length = buffer.length * numChannels * 2;
+            const headerLength = 44;
+            const out = new Uint8Array(headerLength + length);
+            const view = new DataView(out.buffer);
+
+            function writeString(offset, string) {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            writeString(0, 'RIFF');
+            view.setUint32(4, 36 + length, true);
+            writeString(8, 'WAVE');
+            writeString(12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, format, true);
+            view.setUint16(22, numChannels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * numChannels * 2, true);
+            view.setUint16(32, numChannels * 2, true);
+            view.setUint16(34, bitDepth, true);
+            writeString(36, 'data');
+            view.setUint32(40, length, true);
+
+            let offset = 44;
+            for (let i = 0; i < buffer.length; i++) {
+                for (let channel = 0; channel < numChannels; channel++) {
+                    let sample = buffer.getChannelData(channel)[i];
+                    sample = Math.max(-1, Math.min(1, sample));
+                    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+                    offset += 2;
+                }
+            }
+            return new Blob([out], { type: 'audio/wav' });
+        }
+
+        // A/B Comparison Toggle Logic
+        const abDuckedBtn = document.getElementById('abDucked');
+        const abOriginalBtn = document.getElementById('abOriginal');
+        let rawOriginalUrl = null;
+
+        function setAbMode(mode) {
+            if (!abDuckedBtn || !abOriginalBtn || !player) return;
+            if (mode === 'ducked') {
+                abDuckedBtn.className = 'rounded-md bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-2.5 py-1 font-semibold text-white transition';
+                abOriginalBtn.className = 'rounded-md px-2.5 py-1 text-slate-400 transition hover:text-white';
+                if (objectUrl) player.src = objectUrl;
+            } else {
+                abOriginalBtn.className = 'rounded-md bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-2.5 py-1 font-semibold text-white transition';
+                abDuckedBtn.className = 'rounded-md px-2.5 py-1 text-slate-400 transition hover:text-white';
+                if (rawOriginalUrl) player.src = rawOriginalUrl;
+            }
+            player.play().catch(() => {});
+        }
+
+        if (abDuckedBtn && abOriginalBtn) {
+            abDuckedBtn.addEventListener('click', () => setAbMode('ducked'));
+            abOriginalBtn.addEventListener('click', async () => {
+                if (!rawOriginalUrl) {
+                    const dialogue = tracks.dialogue ? tracks.dialogue.file() : null;
+                    const music = tracks.music ? tracks.music.file() : null;
+                    if (dialogue && music) {
+                        try {
+                            const dArr = new Uint8Array(await dialogue.arrayBuffer());
+                            const mArr = new Uint8Array(await music.arrayBuffer());
+                            const actx = new (window.AudioContext || window.webkitAudioContext)();
+                            const dBuf = await actx.decodeAudioData(dArr.buffer);
+                            const mBuf = await actx.decodeAudioData(mArr.buffer);
+                            const dur = Math.max(dBuf.duration, mBuf.duration);
+                            const octx = new OfflineAudioContext(2, 44100 * dur, 44100);
+                            const s1 = octx.createBufferSource(); s1.buffer = dBuf; s1.connect(octx.destination);
+                            const s2 = octx.createBufferSource(); s2.buffer = mBuf; s2.connect(octx.destination);
+                            s1.start(0); s2.start(0);
+                            const res = await octx.startRendering();
+                            rawOriginalUrl = URL.createObjectURL(bufferToWav(res));
+                        } catch (_) {}
+                    }
+                }
+                setAbMode('original');
+            });
+        }
             notify('Payment received. Activating Pro…');
             setTimeout(refreshBilling, 1200);
         } else {
