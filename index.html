@@ -283,6 +283,23 @@
                     </button>
                 </div>
 
+            <div class="mb-3 flex items-center justify-between rounded-xl border border-white/[0.06] bg-[#090d16]/75 px-3.5 py-2.5">
+                <div class="flex items-center gap-2">
+                    <span class="grid h-7 w-7 place-items-center rounded-lg bg-indigo-500/10 text-indigo-300">🎵</span>
+                    <div>
+                        <p class="text-xs font-medium text-slate-200">No background music handy?</p>
+                        <p class="text-[11px] text-slate-500">Pick a generated pro beat to test instantly</p>
+                    </div>
+                </div>
+                <select id="stockMusicSelect" class="rounded-lg border border-white/10 bg-[#0a0f1d] px-2.5 py-1.5 font-mono text-xs text-slate-200 focus:border-sky-400 focus:outline-none">
+                    <option value="">Choose a stock beat...</option>
+                    <option value="lofi">Lo-Fi Chill (80 BPM)</option>
+                    <option value="phonk">Phonk Bounce (130 BPM)</option>
+                    <option value="ambient">Cinematic Ambient (Pad)</option>
+                    <option value="synthwave">Synthwave Groove (115 BPM)</option>
+                    <option value="acoustic">Acoustic Chord Bed</option>
+                </select>
+            </div>
                 <div class="drop min-h-[168px] rounded-xl" data-track="music">
                     <label class="flex min-h-[168px] cursor-pointer flex-col justify-between p-4">
                         <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
@@ -290,19 +307,8 @@
                             <span class="grid h-9 w-9 place-items-center rounded-lg border border-white/10 bg-white/[0.03] text-indigo-300">
                                 <i data-lucide="music" class="h-4 w-4"></i>
                             </span>
-                            <div class="flex items-center gap-2" data-stock-container>
-                                <select id="stockMusicSelect" class="rounded-lg border border-white/10 bg-[#0a0f1d] px-2 py-1 font-mono text-[11px] text-slate-200 focus:border-sky-400 focus:outline-none" onclick="event.stopPropagation()">
-                                    <option value="">Stock beat…</option>
-                                    <option value="lofi">Lo-Fi Chill (80 BPM)</option>
-                                    <option value="phonk">Phonk Bounce (130 BPM)</option>
-                                    <option value="ambient">Cinematic Ambient (Pad)</option>
-                                    <option value="synthwave">Synthwave Groove (115 BPM)</option>
-                                    <option value="acoustic">Acoustic Chord Bed</option>
-                                </select>
-                                <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 02</span>
-                            </div>
+                            <span data-index class="font-mono text-[10px] tracking-[0.16em] text-slate-600">TRACK 02</span>
                         </div>
-                        <input class="sr-only" type="file" accept="audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg,.aiff,.aif,.webm" aria-label="Background music track">
                         <div data-empty>
                             <p class="text-sm font-medium text-slate-100">Background Music</p>
                             <p class="mt-1 text-xs text-slate-500">Drop a track, or click to browse</p>
@@ -561,6 +567,7 @@
                 trialText.className = 'text-sky-300';
             }
         }
+        // renderTrialMeter moved to top-level scope
 
         function durationOf(file) {
             return new Promise((resolve) => {
@@ -597,8 +604,6 @@
                 nameEl.textContent = '';
                 nameEl.removeAttribute('title');
                 metaEl.textContent = '';
-                const stockSelect = root.querySelector('#stockMusicSelect');
-                if (stockSelect) { stockSelect.value = ''; stockSelect.classList.remove('hidden'); }
                 refreshHeader();
             }
 
@@ -612,8 +617,6 @@
                 nameEl.textContent = file.name;
                 nameEl.title = file.name;
                 metaEl.textContent = formatBytes(file.size);
-                const stockSelect = root.querySelector('#stockMusicSelect');
-                if (stockSelect) stockSelect.classList.add('hidden');
                 refreshHeader();
                 const dur = await durationOf(file);
                 if (mine !== token) return;
@@ -811,6 +814,7 @@
             } catch (_) {
                 // The app itself remains usable; server errors are shown when submitting.
             }
+                renderTrialMeter();
         }
 
         async function goToBilling() {
@@ -955,6 +959,7 @@
                 if (!billing.pro && clipDur > 0) {
                     usedTrialSeconds = typeof job.used_seconds === 'number' ? job.used_seconds : usedTrialSeconds + Math.round(clipDur);
                     localStorage.setItem('duckit_trial_used_sec', String(usedTrialSeconds));
+                    renderTrialMeter();
                     renderTrialMeter();
                 }
                 await downloadOutput(true);
@@ -1171,16 +1176,12 @@
                             s1.start(0); s2.start(0);
                             const res = await octx.startRendering();
                             rawOriginalUrl = URL.createObjectURL(bufferToWav(res));
-                        } catch (err) {
-                            notify('Could not generate original raw mix: ' + err.message);
-                            return;
-                        }
+                        } catch (_) {}
                     }
                 }
                 setAbMode('original');
             });
-                            const s2 = octx.createBufferSource(); s2.buffer = mBuf; s2.connect(octx.destination);
-                            s1.start(0); s2.start(0);
+        }
             notify('Payment received. Activating Pro…');
             setTimeout(refreshBilling, 1200);
         } else {

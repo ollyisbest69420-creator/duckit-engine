@@ -10,6 +10,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import ffmpeg
+import numpy as np
 import soundfile as sf
 import stripe
 import torch
@@ -244,37 +245,6 @@ def vad_components():
     return model, utils[0]
 
 
-def build_smooth_ducking_expr(timestamps, duck_vol=0.15, fade_sec=0.25, pad_sec=0.15):
-    if not timestamps:
-        return "1.0"
-
-    padded = []
-    for ts in timestamps:
-        start = max(0.0, (ts["start"] / 16000.0) - pad_sec)
-        end = (ts["end"] / 16000.0) + pad_sec
-        if padded and start <= padded[-1][1]:
-            padded[-1][1] = max(padded[-1][1], end)
-        else:
-            padded.append([start, end])
-
-    drop = max(0.0, min(1.0, 1.0 - duck_vol))
-    fade_sec = max(0.01, fade_sec)
-    parts = ["1.0"]
-
-    for start, end in padded:
-        fade_in_start = max(0.0, start - fade_sec)
-        fade_out_end = end + fade_sec
-        parts.append(
-            f"+if(between(t,{fade_in_start:.3f},{start:.3f}),"
-            f"1.0-({drop:.3f}*((t-{fade_in_start:.3f})/{fade_sec:.3f})),0)"
-            f"+if(between(t,{start:.3f},{end:.3f}),{duck_vol:.3f},0)"
-            f"+if(between(t,{end:.3f},{fade_out_end:.3f}),"
-            f"{duck_vol:.3f}+({drop:.3f}*((t-{end:.3f})/{fade_sec:.3f})),0)"
-        )
-
-    return "".join(parts)
-
-
 @app.get("/", include_in_schema=False)
 def homepage():
     return FileResponse(INDEX_FILE, headers={"Cache-Control": "no-store"})
@@ -353,6 +323,7 @@ async def duck_audio(
     dialogue_path = UPLOAD_DIR / f"{run_id}-dialogue.audio"
     music_path = UPLOAD_DIR / f"{run_id}-music.audio"
     vad_path = UPLOAD_DIR / f"{run_id}-vad.wav"
+    sidechain_wav_path = UPLOAD_DIR / f"{run_id}-sidechain.wav"
     output_path = OUTPUT_DIR / f"{run_id}.mp3"
 
     try:
@@ -380,20 +351,41 @@ async def duck_audio(
                 },
             )
 
+        # Prepare VAD audio and extract speech timestamps
         prepare_vad_audio(dialogue_path, vad_path)
         model, get_speech_timestamps = vad_components()
 
         data, _ = sf.read(vad_path)
         wav = torch.tensor(data, dtype=torch.float32)
         timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
-        volume_filter = build_smooth_ducking_expr(timestamps, duck_vol=duck_vol)
 
+        # Build VAD-gated sidechain track: preserves speech RMS dynamics while zeroing out non-speech noise
+        sidechain_data = np.zeros_like(data)
+        for ts in timestamps:
+            start_idx = ts["start"]
+            end_idx = ts["end"]
+            sidechain_data[start_idx:end_idx] = data[start_idx:end_idx]
+
+        sf.write(str(sidechain_wav_path), sidechain_data, 16000)
+
+        # Audio-reactive processing pipeline using FFmpeg sidechain compression (RMS follower)
         input_dialogue = ffmpeg.input(str(dialogue_path))
-        input_music = ffmpeg.input(str(music_path)).filter(
-            "volume", volume=volume_filter, eval="frame"
+        input_music = ffmpeg.input(str(music_path))
+        input_sidechain = ffmpeg.input(str(sidechain_wav_path))
+
+        # Dynamic sidechain compression makes music react smoothly to speech volume rises and falls
+        ducked_music = ffmpeg.filter(
+            [input_music, input_sidechain],
+            "sidechaincompress",
+            threshold=0.02,
+            ratio=5.0 + (0.5 - duck_vol) * 10,  # Adapts sensitivity based on user slider intensity
+            attack=15,
+            release=250,
+            makeup=1.0,
         )
+
         mixed = ffmpeg.filter(
-            [input_music, input_dialogue],
+            [ducked_music, input_dialogue],
             "amix",
             inputs=2,
             duration="first",
@@ -449,7 +441,7 @@ async def duck_audio(
             detail="Processing failed. Please try different audio files.",
         )
     finally:
-        for path in (dialogue_path, music_path, vad_path):
+        for path in (dialogue_path, music_path, vad_path, sidechain_wav_path):
             path.unlink(missing_ok=True)
 
 
