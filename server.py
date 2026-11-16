@@ -351,7 +351,6 @@ async def duck_audio(
                 },
             )
 
-        # Prepare VAD audio and extract speech timestamps
         prepare_vad_audio(dialogue_path, vad_path)
         model, get_speech_timestamps = vad_components()
 
@@ -359,7 +358,6 @@ async def duck_audio(
         wav = torch.tensor(data, dtype=torch.float32)
         timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
 
-        # Build VAD-gated sidechain track: preserves speech RMS dynamics while zeroing out non-speech noise
         sidechain_data = np.zeros_like(data)
         for ts in timestamps:
             start_idx = ts["start"]
@@ -368,19 +366,18 @@ async def duck_audio(
 
         sf.write(str(sidechain_wav_path), sidechain_data, 16000)
 
-        # Audio-reactive processing pipeline using FFmpeg sidechain compression (RMS follower)
         input_dialogue = ffmpeg.input(str(dialogue_path))
         input_music = ffmpeg.input(str(music_path))
         input_sidechain = ffmpeg.input(str(sidechain_wav_path))
 
-        # Dynamic sidechain compression makes music react smoothly to speech volume rises and falls
+        # Smoothed sidechain compression with gradual attack and long release to eliminate choppy pumping
         ducked_music = ffmpeg.filter(
             [input_music, input_sidechain],
             "sidechaincompress",
-            threshold=0.02,
-            ratio=5.0 + (0.5 - duck_vol) * 10,  # Adapts sensitivity based on user slider intensity
-            attack=15,
-            release=250,
+            threshold=0.015,
+            ratio=4.0,
+            attack=50,
+            release=800,
             makeup=1.0,
         )
 
