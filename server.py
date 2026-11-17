@@ -126,6 +126,7 @@ def load_vad_model_safely():
             model="silero_vad",
             force_reload=False,
             onnx=True,
+            trust_repo=True,
         )
         ml_models["vad_model"] = model
         ml_models["get_speech_timestamps"] = utils[0]
@@ -138,6 +139,7 @@ def load_vad_model_safely():
                 model="silero_vad",
                 force_reload=False,
                 onnx=False,
+                trust_repo=True,
             )
             ml_models["vad_model"] = model
             ml_models["get_speech_timestamps"] = utils[0]
