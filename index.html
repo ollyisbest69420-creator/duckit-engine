@@ -4,8 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#090d16">
-    <meta name="description" content="DuckIt.ai balances background music against voiceover instantly — no manual keyframes in Premiere or CapCut.">
-    <title>DuckIt.ai — Instant AI Audio Ducking</title>
+    <meta name="description" content="Duck It automatically lowers background music when people speak — smooth adaptive ducking in your browser.">
+    <title>Duck It — Automatically Lowers Background Music When People Speak</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0%25' stop-color='%2338bdf8'/%3E%3Cstop offset='100%25' stop-color='%236366f1'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='url(%23g)'/%3E%3Cpath d='M6 16h2.8l2-5.4L14.8 22.5l3.2-10.5L20.5 18.5H26' fill='none' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -26,6 +26,11 @@
                 },
             },
         };
+    </script>
+    <!-- PostHog Analytics Script -->
+    <script>
+        !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.f=function(t,e){u[e]=function(){u.push([e].concat(Array.prototype.slice.call(arguments,0)))}};,p="https://app.posthog.com",u.init(i,s,a)}(window,window.posthog||[]);
+        posthog.init('YOUR_POSTHOG_API_KEY', { api_host: 'https://app.posthog.com' })
     </script>
     <style>
         :root { color-scheme: dark; }
@@ -212,16 +217,16 @@
                     </svg>
                 </span>
                 <span class="relative text-[15px] font-semibold tracking-tight">
-                    <span class="absolute inset-0 bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent blur-[6px] opacity-80" aria-hidden="true">DuckIt.ai</span>
-                    <span class="relative bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent">DuckIt.ai</span>
+                    <span class="absolute inset-0 bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent blur-[6px] opacity-80" aria-hidden="true">Duck It</span>
+                    <span class="relative bg-gradient-to-r from-[#38bdf8] to-[#6366f1] bg-clip-text text-transparent">Duck It</span>
                 </span>
                 <span class="hidden rounded-full bg-gradient-to-r from-[#38bdf8]/50 to-[#6366f1]/50 p-px sm:inline-block">
                     <span class="block rounded-full bg-[#0b1220] px-2 py-0.5 font-mono text-[10px] tracking-[0.14em] text-slate-300">v1.0 Pro</span>
                 </span>
             </div>
             <div class="flex items-center gap-3">
-                <span id="planBadge" class="hidden rounded-full border border-sky-400/25 bg-sky-400/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200">
-                    Free · 2 min
+                <span id="planBadge" class="hidden rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200">
+                    3 exports remaining
                 </span>
                 <button id="upgradeBtn" type="button" class="rounded-lg bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-3 py-1.5 text-xs font-semibold text-white shadow-[0_8px_24px_-10px_rgba(56,189,248,0.95)] transition hover:brightness-110">
                     Upgrade to Pro
@@ -238,16 +243,16 @@
     </header>
 
     <main class="relative mx-auto max-w-5xl px-5 pb-8 pt-12 sm:px-6 sm:pt-16">
-        <section class="max-w-2xl">
+        <section class="mx-auto max-w-2xl text-center">
             <p class="font-mono text-[11px] uppercase tracking-[0.22em] text-[#7dd3fc]">For YouTube, TikTok, and podcasts</p>
-            <h1 class="mt-3 text-[2.6rem] font-semibold leading-[1.02] tracking-[-0.04em] text-white sm:text-6xl">Instant AI Audio Ducking</h1>
-            <p class="mt-4 max-w-xl text-[15px] leading-relaxed text-slate-400 sm:text-base">
-                Balance background music against a voiceover in one pass. DuckIt finds speech and rides the bed down with smooth curves — no manual keyframes in Premiere or CapCut.
+            <h1 class="mt-3 text-[2.8rem] font-bold leading-[1.02] tracking-[-0.04em] text-white sm:text-6xl">Duck It</h1>
+            <p class="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-slate-300 sm:text-lg">
+                Automatically lowers background music when people speak.
             </p>
-            <div class="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">
+            <div class="mt-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">
                 <span>Silero VAD</span>
                 <span class="text-slate-700" aria-hidden="true">/</span>
-                <span>Smooth fades</span>
+                <span>Adaptive Envelope</span>
                 <span class="text-slate-700" aria-hidden="true">/</span>
                 <span>320 kbps mix</span>
             </div>
@@ -332,13 +337,14 @@
                     <i data-lucide="x" class="h-3.5 w-3.5"></i>
                 </button>
             </div>
+
             <div id="trialMeter" hidden class="mt-5 rounded-xl border border-white/[0.06] bg-[#090d16]/75 p-3.5">
                 <div class="flex items-center justify-between font-mono text-[10px] uppercase tracking-[0.14em]">
-                    <span class="text-slate-400">Free trial allowance</span>
-                    <span id="trialText" class="text-sky-300">0:00 / 2:00 used</span>
+                    <span class="text-slate-400">Free plan usage</span>
+                    <span id="trialText" class="text-sky-300">3 exports remaining</span>
                 </div>
                 <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-white/[0.08]">
-                    <div id="trialBar" class="h-full rounded-full bg-gradient-to-r from-[#38bdf8] to-[#6366f1] transition-all duration-300" style="width: 0%"></div>
+                    <div id="trialBar" class="h-full rounded-full bg-gradient-to-r from-[#38bdf8] to-[#6366f1] transition-all duration-300" style="width: 100%"></div>
                 </div>
             </div>
 
@@ -353,7 +359,7 @@
                 </span>
             </button>
             <p id="planNote" class="mt-3 text-center text-[11px] text-slate-500">
-                Free exports support tracks up to 2 minutes. Pro unlocks unlimited exports.
+                3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.
             </p>
         </form>
 
@@ -378,7 +384,7 @@
                     </li>
                     <li class="step flex items-start gap-3 pb-4" data-state="pending">
                         <span class="dot"></span>
-                        <span class="label text-sm">Applying smooth ducking curves...</span>
+                        <span class="label text-sm">Applying adaptive ducking curves...</span>
                         <time class="ml-auto font-mono text-[11px] text-slate-600"></time>
                     </li>
                     <li class="step flex items-start gap-3" data-state="pending">
@@ -404,13 +410,45 @@
         </section>
     </main>
 
+    <!-- Length Limit Modal -->
+    <div id="lengthModal" hidden class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <div class="panel w-full max-w-md rounded-2xl border border-white/15 p-6 shadow-2xl">
+            <div class="flex items-start justify-between gap-3">
+                <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-amber-400/30 bg-amber-400/10 text-amber-300">
+                    <i data-lucide="clock" class="h-5 w-5"></i>
+                </div>
+                <button type="button" id="modalCloseBtn" class="rounded-lg p-1.5 text-slate-400 transition hover:bg-white/10 hover:text-white" aria-label="Close modal">
+                    <i data-lucide="x" class="h-4 w-4"></i>
+                </button>
+            </div>
+            <h3 id="modalTitle" class="mt-4 text-lg font-semibold text-white">Your file is longer than the Free plan allows.</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">
+                Download the first 3 minutes for free, or upgrade to process the entire file.
+            </p>
+            <div class="mt-6 flex flex-col gap-2.5 sm:flex-row">
+                <button type="button" id="modalTrimBtn" class="flex-1 rounded-xl border border-white/15 bg-white/[0.05] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-white/10">
+                    Download 3-Min Version
+                </button>
+                <button type="button" id="modalUpgradeBtn" class="flex-1 rounded-xl bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-4 py-2.5 text-xs font-semibold text-white shadow-[0_8px_24px_-8px_rgba(56,189,248,0.85)] transition hover:brightness-110">
+                    Upgrade to Pro
+                </button>
+            </div>
+        </div>
+    </div>
+
     <footer class="relative mx-auto flex max-w-5xl flex-col gap-1 px-5 py-8 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <p>© 2026 DuckIt.ai</p>
+        <p>© 2026 Duck It</p>
         <p>Powered by FastAPI &amp; PyTorch Silero VAD</p>
     </footer>
 
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
     <script>
+        function trackEvent(name, props) {
+            if (window.posthog && typeof window.posthog.capture === 'function') {
+                window.posthog.capture(name, props || {});
+            }
+        }
+
         const AUDIO_EXT = /\.(mp3|wav|wave|m4a|aac|flac|ogg|oga|aiff|aif|webm|mp4|mpeg|mpga)$/i;
         const steps = Array.from(document.querySelectorAll('#feedSteps .step'));
         const duckVol = document.getElementById('duckVol');
@@ -436,8 +474,14 @@
         const trialMeter = document.getElementById('trialMeter');
         const trialBar = document.getElementById('trialBar');
         const trialText = document.getElementById('trialText');
-        const TRIAL_LIMIT_SEC = 120;
-        let usedTrialSeconds = Number(localStorage.getItem('duckit_trial_used_sec')) || 0;
+        const lengthModal = document.getElementById('lengthModal');
+        const modalCloseBtn = document.getElementById('modalCloseBtn');
+        const modalTrimBtn = document.getElementById('modalTrimBtn');
+        const modalUpgradeBtn = document.getElementById('modalUpgradeBtn');
+
+        const MAX_FREE_EXPORTS = 3;
+        const FREE_CLIP_LIMIT_SEC = 180;
+        let exportsUsed = Number(localStorage.getItem('duckit_free_exports_used')) || 0;
         let billing = { pro: false };
         let downloadUrl = null;
         let outputFilename = 'duckit-mix.mp3';
@@ -446,6 +490,7 @@
         let settled = false;
         let timers = [];
         let objectUrl = null;
+        let pendingFiles = null;
         const tracks = {};
 
         function isAudio(file) {
@@ -516,29 +561,32 @@
             duckVol.setAttribute('aria-valuenow', String(value));
             volVal.textContent = String(value);
             volHint.textContent = value === 15 ? 'Engine default' : 'Custom level';
+        }
+
         function renderTrialMeter() {
             if (billing.pro) {
                 trialMeter.hidden = true;
                 return;
             }
             trialMeter.hidden = false;
-            const capped = Math.min(usedTrialSeconds, TRIAL_LIMIT_SEC);
-            const pct = Math.min(100, Math.round((capped / TRIAL_LIMIT_SEC) * 100));
-            const usedLabel = formatTime(capped) || '0:00';
-            trialText.textContent = usedLabel + ' / 2:00 used';
+            const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
+            const pct = Math.max(0, Math.min(100, Math.round((remaining / MAX_FREE_EXPORTS) * 100)));
+            trialText.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
             trialBar.style.width = pct + '%';
 
-            if (pct >= 100) {
+            if (remaining === 0) {
                 trialBar.className = 'h-full rounded-full bg-rose-500 transition-all duration-300';
                 trialText.className = 'text-rose-300';
-            } else if (pct >= 75) {
+            } else if (remaining === 1) {
                 trialBar.className = 'h-full rounded-full bg-amber-400 transition-all duration-300';
                 trialText.className = 'text-amber-300';
             } else {
                 trialBar.className = 'h-full rounded-full bg-gradient-to-r from-[#38bdf8] to-[#6366f1] transition-all duration-300';
                 trialText.className = 'text-sky-300';
             }
-        }
+            if (planBadge && !billing.pro) {
+                planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
+            }
         }
 
         function durationOf(file) {
@@ -617,6 +665,7 @@
                 }
                 current = file;
                 notify(null);
+                trackEvent('upload_started', { track: root.dataset.track });
                 renderFile(file);
             }
 
@@ -765,31 +814,31 @@
                 if (!response.ok) return;
 
                 billing = await response.json();
-                if (typeof billing.used_seconds === 'number') {
-                    usedTrialSeconds = billing.used_seconds;
-                    localStorage.setItem('duckit_trial_used_sec', String(usedTrialSeconds));
+                if (typeof billing.free_exports_used === 'number') {
+                    exportsUsed = billing.free_exports_used;
+                    localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
                 }
                 planBadge.hidden = false;
 
                 if (billing.pro) {
                     planBadge.textContent = 'Pro · Unlimited';
-                    planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
+                    planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
                     upgradeBtn.textContent = 'Manage plan';
-                    planNote.textContent = 'Pro is active — unlimited exports and 24-hour download access.';
+                    planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
                 } else {
-                    planBadge.textContent = 'Free · 2 min';
-                    planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
+                    const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
+                    planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
+                    planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
                     upgradeBtn.textContent = 'Upgrade to Pro';
-                    planNote.textContent = 'Free exports support tracks up to 2 minutes. Pro unlocks unlimited exports.';
+                    planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
                 }
                 renderTrialMeter();
-            } catch (_) {
-                // The app itself remains usable; server errors are shown when submitting.
-            }
-                renderTrialMeter();
+            } catch (_) {}
+            renderTrialMeter();
         }
 
         async function goToBilling() {
+            trackEvent('upgrade_clicked');
             upgradeBtn.disabled = true;
             const original = upgradeBtn.textContent;
             upgradeBtn.textContent = 'Opening…';
@@ -798,6 +847,8 @@
                 const endpoint = billing.pro
                     ? '/api/billing/portal'
                     : '/api/billing/checkout';
+
+                if (!billing.pro) trackEvent('checkout_started');
 
                 const response = await fetch(endpoint, {
                     method: 'POST',
@@ -847,7 +898,8 @@
 
             if (autoDownload) triggerDownload(objectUrl);
         }
-        async function processAudio(dialogue, music) {
+
+        async function processAudio(dialogue, music, trimToFreeLimit = false) {
             settled = false;
             clearTimers();
             notify(null);
@@ -873,12 +925,11 @@
             formData.append('dialogue', dialogue);
             formData.append('music', music);
             formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
+            if (trimToFreeLimit) {
+                formData.append('trim_seconds', '180');
+            }
 
             try {
-                // HARDENED AUTH VULNERABILITY FIX:
-                // 1. Checks localStorage for any saved user tokens (Bearer, Basic, or API keys).
-                // 2. Automatically pulls standard auth headers if your backend uses API keys or session cookies.
-                // 3. Ensures credentials mode is included so cookies/sessions are transmitted correctly if required.
                 const headers = {};
                 const token = localStorage.getItem('access_token') || localStorage.getItem('token') || sessionStorage.getItem('token');
                 if (token) {
@@ -892,32 +943,23 @@
                 const response = await fetch('/api/duck', {
                     method: 'POST',
                     headers: headers,
-                    credentials: 'same-origin', // Prevents cross-site cookie/auth dropping
+                    credentials: 'same-origin',
                     body: formData
                 });
 
-                if (response.status === 401) {
-                    throw new Error('Authentication failed (401). Please check your login credentials, authorization headers, or token storage.');
-                }
-                if (response.status === 403) {
-                    throw new Error('Access forbidden (403). You do not have permission to execute this request.');
-                }
+                if (response.status === 401) throw new Error('Authentication failed (401).');
+                if (response.status === 403) throw new Error('Access forbidden (403).');
                 if (!response.ok) {
                     let detail = 'Processing failed on the server.';
                     try {
                         const data = await response.json();
                         detail = formatDetail(data.detail);
-                    } catch (parseError) {
-                        detail = 'Processing failed on the server (HTTP ' + response.status + ').';
-                    }
+                    } catch (_) {}
                     throw new Error(detail);
                 }
 
                 const job = await response.json();
-
-                if (!job.download_url) {
-                    throw new Error('The engine did not return a download link.');
-                }
+                if (!job.download_url) throw new Error('The engine did not return a download link.');
 
                 settled = true;
                 clearTimers();
@@ -927,12 +969,14 @@
 
                 downloadUrl = job.download_url;
                 outputFilename = job.filename || 'duckit-mix.mp3';
-                const clipDur = (await durationOf(dialogue)) || (await durationOf(music)) || 0;
-                if (!billing.pro && clipDur > 0) {
-                    usedTrialSeconds = typeof job.used_seconds === 'number' ? job.used_seconds : usedTrialSeconds + Math.round(clipDur);
-                    localStorage.setItem('duckit_trial_used_sec', String(usedTrialSeconds));
+
+                if (!billing.pro) {
+                    exportsUsed = typeof job.free_exports_used === 'number' ? job.free_exports_used : exportsUsed + 1;
+                    localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
                     renderTrialMeter();
                 }
+
+                trackEvent('export_completed', { pro: billing.pro, trimmed: trimToFreeLimit });
                 await downloadOutput(true);
             } catch (error) {
                 settled = true;
@@ -941,9 +985,7 @@
                 failSteps();
                 setBadge('Failed', 'err');
                 setHeader('Error', 'rose');
-                const message = error && error.message && error.message !== 'Failed to fetch'
-                    ? error.message
-                    : 'Could not reach the DuckIt engine. Check that the backend server is running, CORS is enabled, and your authorization headers are valid.';
+                const message = error && error.message ? error.message : 'Could not reach the engine.';
                 notify(message);
                 live.textContent = message;
             } finally {
@@ -952,7 +994,30 @@
             }
         }
 
-        form.addEventListener('submit', (event) => {
+        function openLengthModal(dialogue, music) {
+            trackEvent('limit_hit', { reason: 'duration_over_3_min' });
+            pendingFiles = { dialogue, music };
+            lengthModal.hidden = false;
+        }
+
+        function closeLengthModal() {
+            lengthModal.hidden = true;
+            pendingFiles = null;
+        }
+
+        modalCloseBtn.addEventListener('click', closeLengthModal);
+        modalUpgradeBtn.addEventListener('click', () => {
+            closeLengthModal();
+            goToBilling();
+        });
+        modalTrimBtn.addEventListener('click', () => {
+            if (!pendingFiles) return;
+            const { dialogue, music } = pendingFiles;
+            closeLengthModal();
+            processAudio(dialogue, music, true);
+        });
+
+        form.addEventListener('submit', async (event) => {
             event.preventDefault();
             if (busy) return;
             const dialogue = tracks.dialogue.file();
@@ -960,14 +1025,25 @@
             if (!dialogue || !music) {
                 if (!dialogue) tracks.dialogue.shake();
                 if (!music) tracks.music.shake();
-                notify(!dialogue && !music
-                    ? 'Add a voiceover and a music track before ducking.'
-                    : !dialogue
-                        ? 'The voiceover track is still missing.'
-                        : 'The background music track is still missing.');
+                notify(!dialogue && !music ? 'Add a voiceover and a music track.' : 'One track is missing.');
                 return;
             }
-            processAudio(dialogue, music);
+
+            if (!billing.pro) {
+                if (exportsUsed >= MAX_FREE_EXPORTS) {
+                    trackEvent('limit_hit', { reason: 'max_free_exports_reached' });
+                    notify('You have used all 3 free exports. Upgrade to Pro.');
+                    return;
+                }
+                const dDur = (await durationOf(dialogue)) || 0;
+                const mDur = (await durationOf(music)) || 0;
+                if (Math.max(dDur, mDur) > FREE_CLIP_LIMIT_SEC) {
+                    openLengthModal(dialogue, music);
+                    return;
+                }
+            }
+
+            processAudio(dialogue, music, false);
         });
 
         if (window.lucide) lucide.createIcons();
@@ -976,6 +1052,7 @@
 
         const checkoutState = new URLSearchParams(window.location.search).get('checkout');
         if (checkoutState === 'success') {
+            trackEvent('subscription_started');
             notify('Payment received. Activating Pro…');
             setTimeout(refreshBilling, 1200);
         } else {

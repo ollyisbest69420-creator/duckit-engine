@@ -5,7 +5,7 @@ import shutil
 import sqlite3
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
 
@@ -29,7 +29,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "private-outputs"
 DB_PATH = DATA_DIR / "duckit.sqlite3"
 
-FREE_LIMIT_SECONDS = 120
+MAX_FREE_EXPORTS = 3
 MAX_SOURCE_SECONDS = 60 * 60
 MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 OUTPUT_TTL_SECONDS = 24 * 60 * 60
@@ -52,7 +52,31 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
 stripe.api_key = STRIPE_SECRET_KEY
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
-app = FastAPI(title="DuckIt API", description="Automated AI Audio Ducking")
+# Global dictionary to hold warm models loaded at startup via FastAPI lifespan
+ml_models = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Optimize CPU threading for small server instances
+    torch.set_num_threads(1)
+    
+    # Load Silero VAD once at server boot with onnx=True for 3x-5x faster CPU inference
+    logger.info("Loading Silero VAD model into RAM...")
+    model, utils = torch.hub.load(
+        repo_or_dir="snakers4/silero-vad",
+        model="silero_vad",
+        force_reload=False,
+        onnx=True,
+    )
+    ml_models["vad_model"] = model
+    ml_models["get_speech_timestamps"] = utils[0]
+    logger.info("Silero VAD model loaded successfully.")
+    
+    yield
+    
+    ml_models.clear()
+
+app = FastAPI(title="DuckIt API", description="Automated AI Audio Ducking", lifespan=lifespan)
 
 allowed_origins = [
     origin.strip()
@@ -90,6 +114,7 @@ def init_db():
                 stripe_customer_id TEXT UNIQUE,
                 subscription_id TEXT UNIQUE,
                 subscription_status TEXT NOT NULL DEFAULT 'none',
+                free_exports_used INTEGER NOT NULL DEFAULT 0,
                 created_at INTEGER NOT NULL
             );
 
@@ -109,6 +134,10 @@ def init_db():
                 processed_at INTEGER NOT NULL
             );
         """)
+        cursor = conn.execute("PRAGMA table_info(identities)")
+        columns = [col["name"] for col in cursor.fetchall()]
+        if "free_exports_used" not in columns:
+            conn.execute("ALTER TABLE identities ADD COLUMN free_exports_used INTEGER NOT NULL DEFAULT 0")
 
 
 init_db()
@@ -157,7 +186,7 @@ def current_identity(request: Request, response: Response) -> str:
     identity_id = uuid.uuid4().hex
     with db() as conn:
         conn.execute(
-            "INSERT INTO identities (id, created_at) VALUES (?, ?)",
+            "INSERT INTO identities (id, free_exports_used, created_at) VALUES (?, 0, ?)",
             (identity_id, int(time.time())),
         )
     set_identity_cookie(response, identity_id)
@@ -167,10 +196,13 @@ def current_identity(request: Request, response: Response) -> str:
 def entitlement_payload(identity_id: str):
     user = user_row(identity_id)
     pro = is_pro(user)
+    used = user["free_exports_used"] if user else 0
     return {
         "plan": "pro" if pro else "free",
         "pro": pro,
-        "free_limit_seconds": FREE_LIMIT_SECONDS,
+        "free_exports_used": used,
+        "max_free_exports": MAX_FREE_EXPORTS,
+        "exports_remaining": max(0, MAX_FREE_EXPORTS - used),
         "subscription_status": user["subscription_status"] if user else "none",
     }
 
@@ -233,16 +265,33 @@ def prepare_vad_audio(input_path: Path, output_path: Path):
     )
 
 
-@lru_cache(maxsize=1)
-def vad_components():
-    torch.set_num_threads(1)
-    model, utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        force_reload=False,
-        trust_repo=True,
-    )
-    return model, utils[0]
+def apply_ducking_vectorized(music_audio, sample_rate, speech_timestamps, duck_vol=0.15, fade_duration=0.05):
+    """
+    Applies smooth volume ducking using NumPy vectorization.
+    """
+    envelope = np.ones(len(music_audio), dtype=np.float32)
+    fade_samples = int(fade_duration * sample_rate)
+
+    for ts in speech_timestamps:
+        start = ts['start']
+        end = ts['end']
+        
+        envelope[start:end] = duck_vol
+        
+        fade_out_start = max(0, start - fade_samples)
+        if start > fade_out_start:
+            ramp_out = np.linspace(1.0, duck_vol, start - fade_out_start)
+            envelope[fade_out_start:start] = ramp_out
+            
+        fade_in_end = min(len(music_audio), end + fade_samples)
+        if fade_in_end > end:
+            ramp_in = np.linspace(duck_vol, 1.0, fade_in_end - end)
+            envelope[end:fade_in_end] = ramp_in
+
+    if music_audio.ndim > 1:
+        envelope = envelope[:, np.newaxis]
+        
+    return music_audio * envelope
 
 
 @app.get("/", include_in_schema=False)
@@ -315,6 +364,7 @@ async def duck_audio(
     dialogue: UploadFile = File(...),
     music: UploadFile = File(...),
     duck_vol: float = Form(0.15, ge=0.01, le=0.50),
+    trim_seconds: int | None = Form(None),
     identity_id: str = Depends(current_identity),
 ):
     cleanup_expired_outputs()
@@ -323,7 +373,7 @@ async def duck_audio(
     dialogue_path = UPLOAD_DIR / f"{run_id}-dialogue.audio"
     music_path = UPLOAD_DIR / f"{run_id}-music.audio"
     vad_path = UPLOAD_DIR / f"{run_id}-vad.wav"
-    sidechain_wav_path = UPLOAD_DIR / f"{run_id}-sidechain.wav"
+    ducked_music_path = UPLOAD_DIR / f"{run_id}-ducked-music.wav"
     output_path = OUTPUT_DIR / f"{run_id}.mp3"
 
     try:
@@ -334,7 +384,8 @@ async def duck_audio(
         music_seconds = source_duration(music_path)
         longest_source = max(dialogue_seconds, music_seconds)
         user = user_row(identity_id)
-        free_job = not is_pro(user)
+        pro_active = is_pro(user)
+        free_job = not pro_active
 
         if longest_source > MAX_SOURCE_SECONDS:
             raise HTTPException(
@@ -342,58 +393,54 @@ async def duck_audio(
                 detail="Source tracks must be one hour or shorter.",
             )
 
-        if free_job and longest_source > FREE_LIMIT_SECONDS:
-            raise HTTPException(
-                status_code=402,
-                detail={
-                    "code": "upgrade_required",
-                    "message": "Free exports support tracks up to 2 minutes. Upgrade to Pro for unlimited exports.",
-                },
-            )
+        if free_job:
+            current_used = user["free_exports_used"] if user else 0
+            if current_used >= MAX_FREE_EXPORTS:
+                raise HTTPException(
+                    status_code=402,
+                    detail={
+                        "code": "upgrade_required",
+                        "message": "You have used your 3 free exports. Upgrade to Pro for unlimited exports.",
+                    },
+                )
 
         prepare_vad_audio(dialogue_path, vad_path)
-        model, get_speech_timestamps = vad_components()
+        
+        # Retrieve preloaded ONNX model from startup lifespan
+        model = ml_models["vad_model"]
+        get_speech_timestamps = ml_models["get_speech_timestamps"]
+        model.reset_states()
 
         data, _ = sf.read(vad_path)
         wav = torch.tensor(data, dtype=torch.float32)
         timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
 
-        sidechain_data = np.zeros_like(data)
-        for ts in timestamps:
-            start_idx = ts["start"]
-            end_idx = ts["end"]
-            sidechain_data[start_idx:end_idx] = data[start_idx:end_idx]
-
-        sf.write(str(sidechain_wav_path), sidechain_data, 16000)
+        # Read music track into NumPy array for vectorized ducking application
+        music_data, music_sr = sf.read(str(music_path))
+        ducked_music_array = apply_ducking_vectorized(
+            music_data, music_sr, timestamps, duck_vol=duck_vol
+        )
+        sf.write(str(ducked_music_path), ducked_music_array, music_sr)
 
         input_dialogue = ffmpeg.input(str(dialogue_path))
-        input_music = ffmpeg.input(str(music_path))
-        input_sidechain = ffmpeg.input(str(sidechain_wav_path))
-
-        # Smoothed sidechain compression with gradual attack and long release to eliminate choppy pumping
-        ducked_music = ffmpeg.filter(
-            [input_music, input_sidechain],
-            "sidechaincompress",
-            threshold=0.015,
-            ratio=4.0,
-            attack=50,
-            release=800,
-            makeup=1.0,
-        )
+        input_ducked_music = ffmpeg.input(str(ducked_music_path))
 
         mixed = ffmpeg.filter(
-            [ducked_music, input_dialogue],
+            [input_ducked_music, input_dialogue],
             "amix",
             inputs=2,
             duration="first",
             dropout_transition=0.5,
         )
 
+        output_kwargs = {"acodec": "libmp3lame", "audio_bitrate": "320k"}
+        if free_job and trim_seconds:
+            output_kwargs["t"] = min(180, trim_seconds)
+
         ffmpeg.output(
             mixed,
             str(output_path),
-            acodec="libmp3lame",
-            audio_bitrate="320k",
+            **output_kwargs,
         ).run(overwrite_output=True, quiet=True)
 
         if not output_path.exists():
@@ -404,6 +451,11 @@ async def duck_audio(
         expires_at = int(time.time()) + OUTPUT_TTL_SECONDS
 
         with db() as conn:
+            if free_job:
+                conn.execute(
+                    "UPDATE identities SET free_exports_used = free_exports_used + 1 WHERE id = ?",
+                    (identity_id,),
+                )
             conn.execute(
                 """
                 INSERT INTO jobs
@@ -421,10 +473,15 @@ async def duck_audio(
                 ),
             )
 
+        updated_user = user_row(identity_id)
+        exports_used = updated_user["free_exports_used"] if updated_user else 0
+
         return {
             "job_id": job_id,
             "filename": filename,
             "download_url": f"/api/jobs/{job_id}/download",
+            "exports_remaining": max(0, MAX_FREE_EXPORTS - exports_used),
+            "free_exports_used": exports_used,
         }
 
     except HTTPException:
@@ -438,7 +495,7 @@ async def duck_audio(
             detail="Processing failed. Please try different audio files.",
         )
     finally:
-        for path in (dialogue_path, music_path, vad_path, sidechain_wav_path):
+        for path in (dialogue_path, music_path, vad_path, ducked_music_path):
             path.unlink(missing_ok=True)
 
 
