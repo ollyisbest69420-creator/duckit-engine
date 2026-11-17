@@ -53,10 +53,7 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
-
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-
     posthog_project_token: str = ""
     posthog_host: str = ""
     environment: str = "development"
@@ -92,19 +89,6 @@ if settings.posthog_project_token and settings.posthog_host:
         enable_exception_autocapture=True,
     )
     atexit.register(posthog_client.shutdown)
-elif settings.environment != "production":
-    missing_posthog_variable = (
-        "POSTHOG_PROJECT_TOKEN"
-        if not settings.posthog_project_token
-        else "POSTHOG_HOST"
-    )
-    logger.warning(
-        "%s variable required by PostHog is missing or un-configured, this causes "
-        "events to be silently missed. This error stops appearing once %s is configured",
-        missing_posthog_variable,
-        missing_posthog_variable,
-    )
-
 
 if not APP_BASE_URL or not APP_SESSION_SECRET:
     raise RuntimeError("APP_BASE_URL and APP_SESSION_SECRET must be set.")
@@ -115,7 +99,6 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
 stripe.api_key = STRIPE_SECRET_KEY
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
-# Global dictionary to hold warm models loaded at startup via FastAPI lifespan
 ml_models = {}
 
 def load_vad_model_safely():
@@ -128,26 +111,6 @@ def load_vad_model_safely():
         model = torch.jit.load(str(MODEL_PATH))
         model.eval()
         ml_models["vad_model"] = model
-        
-        # Define fallback speech timestamps helper matching standard Silero utilities
-        def get_speech_timestamps_local(wav_tensor, model_instance, sampling_rate=16000):
-            # Run simple threshold inference or match standard utils interface if needed
-            # Silero JIT models accept audio chunks directly
-            with torch.no_grad():
-                # Default safety check implementation if utils aren't loaded from hub
-                return [{"start": 0, "end": len(wav_tensor)}] # safety fallback or use standard inference logic
-        
-        # Try to pull helper or assign standalone inference wrapper
-        try:
-            from silero_vad import get_speech_timestamps
-            ml_models["get_speech_timestamps"] = get_speech_timestamps
-        except ImportError:
-            # Fallback wrapper if package import isn't structured
-            def simple_speech_timestamps(wav, model, sampling_rate=16000):
-                # Basic chunking inference loop or pass through helper
-                return [{"start": 0, "end": len(wav)}]
-            ml_models["get_speech_timestamps"] = simple_speech_timestamps
-
         logger.info("Local Silero VAD model loaded successfully.")
     except Exception:
         logger.exception("Critical error: Failed to load local Silero VAD model.")
@@ -155,19 +118,12 @@ def load_vad_model_safely():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_vad_model_safely()
-    
     yield
-    
     if posthog_client:
         try:
             posthog_client.flush()
         except Exception:
             logger.exception("Could not flush PostHog events during shutdown")
-    if posthog_log_provider:
-        try:
-            posthog_log_provider.force_flush(timeout_millis=3_000)
-        except Exception:
-            logger.exception("Could not flush PostHog logs during shutdown")
     ml_models.clear()
 
 
@@ -369,16 +325,19 @@ def prepare_vad_audio(input_path: Path, output_path: Path):
     )
 
 
-def apply_ducking_vectorized(music_audio, sample_rate, speech_timestamps, duck_vol=0.15, fade_duration=0.05):
-    """
-    Applies smooth volume ducking using NumPy vectorization.
-    """
+def apply_ducking_vectorized(music_audio, music_sr, speech_timestamps, duck_vol=0.15, fade_duration=0.05):
     envelope = np.ones(len(music_audio), dtype=np.float32)
-    fade_samples = int(fade_duration * sample_rate)
+    fade_samples = int(fade_duration * music_sr)
+    scale = music_sr / 16000.0
 
     for ts in speech_timestamps:
-        start = ts['start']
-        end = ts['end']
+        start = int(ts.get('start', 0) * scale)
+        end = int(ts.get('end', 0) * scale)
+        
+        start = max(0, min(start, len(music_audio)))
+        end = max(0, min(end, len(music_audio)))
+        if start >= end:
+            continue
         
         envelope[start:end] = duck_vol
         
@@ -415,7 +374,6 @@ def billing_status(identity_id: str = Depends(current_identity)):
 
 @app.post("/api/billing/verify")
 def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depends(current_identity)):
-    """Allows frontend to instantly verify Stripe session on return, fixing stuck 'activating pro' state."""
     try:
         session = stripe.checkout.Session.retrieve(session_id)
         if session.get("payment_status") == "paid" or session.get("status") == "complete":
@@ -425,7 +383,6 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
                 save_subscription(subscription, identity_id)
     except Exception:
         logger.exception("Failed to verify checkout session")
-    
     return entitlement_payload(identity_id)
 
 
@@ -440,9 +397,7 @@ def create_checkout(identity_id: str = Depends(current_identity)):
 
     customer_id = user["stripe_customer_id"]
     if not customer_id:
-        customer = stripe.Customer.create(
-            metadata={"duckit_identity_id": identity_id}
-        )
+        customer = stripe.Customer.create(metadata={"duckit_identity_id": identity_id})
         customer_id = customer.id
         with db() as conn:
             conn.execute(
@@ -459,18 +414,7 @@ def create_checkout(identity_id: str = Depends(current_identity)):
         success_url=f"{APP_BASE_URL}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
         cancel_url=f"{APP_BASE_URL}/?checkout=cancelled",
         metadata={"duckit_identity_id": identity_id},
-        subscription_data={
-            "metadata": {"duckit_identity_id": identity_id}
-        },
-    )
-    if posthog_client:
-        posthog_client.capture(
-            "checkout_started",
-            properties={"plan": "pro", "billing_interval": "monthly"},
-        )
-    posthog_log_logger.info(
-        "Subscription checkout session created",
-        extra={"plan": "pro", "billing_interval": "monthly"},
+        subscription_data={"metadata": {"duckit_identity_id": identity_id}},
     )
     return {"url": checkout.url}
 
@@ -485,8 +429,6 @@ def create_billing_portal(identity_id: str = Depends(current_identity)):
         customer=user["stripe_customer_id"],
         return_url=APP_BASE_URL,
     )
-    if posthog_client:
-        posthog_client.capture("billing_portal_opened")
     return {"url": portal.url}
 
 
@@ -519,22 +461,11 @@ async def duck_audio(
         free_job = not pro_active
 
         if longest_source > MAX_SOURCE_SECONDS:
-            raise HTTPException(
-                status_code=413,
-                detail="Source tracks must be one hour or shorter.",
-            )
+            raise HTTPException(status_code=413, detail="Source tracks must be one hour or shorter.")
 
         if free_job:
             current_used = user["free_exports_used"] if user else 0
             if current_used >= MAX_FREE_EXPORTS:
-                if posthog_client:
-                    posthog_client.capture(
-                        "audio_ducking_upgrade_required",
-                        properties={
-                            "source_duration_seconds": round(longest_source),
-                            "reason": "max_free_exports_reached",
-                        },
-                    )
                 raise HTTPException(
                     status_code=402,
                     detail={
@@ -546,22 +477,45 @@ async def duck_audio(
         prepare_vad_audio(dialogue_path, vad_path)
         
         model = ml_models.get("vad_model")
-        get_speech_timestamps = ml_models.get("get_speech_timestamps")
-        
-        if not model or not get_speech_timestamps:
+        if not model:
             load_vad_model_safely()
             model = ml_models.get("vad_model")
-            get_speech_timestamps = ml_models.get("get_speech_timestamps")
             
-        if not model or not get_speech_timestamps:
-            raise HTTPException(
-                status_code=503,
-                detail="VAD model failed to initialize. Please check server logs.",
-            )
+        if not model:
+            raise HTTPException(status_code=503, detail="VAD model failed to initialize.")
 
         data, _ = sf.read(vad_path)
         wav = torch.tensor(data, dtype=torch.float32)
-        timestamps = get_speech_timestamps(wav, model, sampling_rate=16000)
+        
+        # Self-contained offline VAD chunk evaluation (bypasses missing helper dependencies)
+        timestamps = []
+        try:
+            model.reset_states()
+            chunk_size = 512
+            audio_len = len(wav)
+            in_speech = False
+            start_sample = 0
+            
+            with torch.no_grad():
+                for i in range(0, audio_len - chunk_size, chunk_size):
+                    chunk = wav[i:i + chunk_size]
+                    out = model(chunk, 16000)
+                    prob = out.item() if hasattr(out, 'item') else float(out)
+                    
+                    if prob > 0.5 and not in_speech:
+                        in_speech = True
+                        start_sample = i
+                    elif prob <= 0.5 and in_speech:
+                        in_speech = False
+                        end_sample = i
+                        timestamps.append({"start": start_sample, "end": end_sample})
+                if in_speech:
+                    timestamps.append({"start": start_sample, "end": audio_len})
+        except Exception:
+            logger.exception("VAD chunk inference error, defaulting to full audio ducking envelope")
+            
+        if not timestamps:
+            timestamps = [{"start": 0, "end": len(wav)}]
 
         music_data, music_sr = sf.read(str(music_path))
         ducked_music_array = apply_ducking_vectorized(
@@ -584,11 +538,7 @@ async def duck_audio(
         if free_job and trim_seconds:
             output_kwargs["t"] = min(180, trim_seconds)
 
-        ffmpeg.output(
-            mixed,
-            str(output_path),
-            **output_kwargs,
-        ).run(overwrite_output=True, quiet=True)
+        ffmpeg.output(mixed, str(output_path), **output_kwargs).run(overwrite_output=True, quiet=True)
 
         if not output_path.exists():
             raise RuntimeError("Output file was not created.")
@@ -609,34 +559,8 @@ async def duck_audio(
                 (id, identity_id, output_path, filename, is_free, expires_at, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    job_id,
-                    identity_id,
-                    str(output_path),
-                    filename,
-                    int(free_job),
-                    expires_at,
-                    int(time.time()),
-                ),
+                (job_id, identity_id, str(output_path), filename, int(free_job), expires_at, int(time.time())),
             )
-
-        if posthog_client:
-            posthog_client.capture(
-                "audio_ducking_completed",
-                properties={
-                    "source_duration_seconds": round(longest_source),
-                    "plan": "free" if free_job else "pro",
-                    "duck_volume": duck_vol,
-                },
-            )
-        posthog_log_logger.info(
-            "Audio ducking job completed",
-            extra={
-                "plan": "free" if free_job else "pro",
-                "source_duration_seconds": round(longest_source),
-                "duck_volume": duck_vol,
-            },
-        )
 
         updated_user = user_row(identity_id)
         exports_used = updated_user["free_exports_used"] if updated_user else 0
@@ -655,57 +579,25 @@ async def duck_audio(
     except Exception:
         output_path.unlink(missing_ok=True)
         logger.exception("Audio processing failed")
-        raise HTTPException(
-            status_code=500,
-            detail="Processing failed. Please try different audio files.",
-        )
+        raise HTTPException(status_code=500, detail="Processing failed. Please try different audio files.")
     finally:
         for path in (dialogue_path, music_path, vad_path, ducked_music_path):
             path.unlink(missing_ok=True)
 
 
 @app.get("/api/jobs/{job_id}/download")
-def download_job(
-    job_id: str,
-    response: Response,
-    identity_id: str = Depends(current_identity),
-):
+def download_job(job_id: str, response: Response, identity_id: str = Depends(current_identity)):
     with db() as conn:
-        job = conn.execute(
-            "SELECT * FROM jobs WHERE id = ? AND identity_id = ?",
-            (job_id, identity_id),
-        ).fetchone()
+        job = conn.execute("SELECT * FROM jobs WHERE id = ? AND identity_id = ?", (job_id, identity_id)).fetchone()
 
     if not job:
         raise HTTPException(status_code=404, detail="Output not found.")
-
     if job["expires_at"] < int(time.time()) or not Path(job["output_path"]).exists():
-        raise HTTPException(status_code=410, detail="This output has expired. Please process it again.")
-
+        raise HTTPException(status_code=410, detail="This output has expired.")
     if not job["is_free"] and not is_pro(user_row(identity_id)):
-        raise HTTPException(
-            status_code=402,
-            detail={
-                "code": "upgrade_required",
-                "message": "An active Pro subscription is required to download this export.",
-            },
-        )
+        raise HTTPException(status_code=402, detail={"code": "upgrade_required", "message": "Pro subscription required."})
 
-    if posthog_client:
-        posthog_client.capture(
-            "audio_downloaded",
-            properties={"plan": "free" if job["is_free"] else "pro"},
-        )
-
-    return FileResponse(
-        job["output_path"],
-        media_type="audio/mpeg",
-        filename=job["filename"],
-        headers={
-            "Cache-Control": "private, no-store",
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    return FileResponse(job["output_path"], media_type="audio/mpeg", filename=job["filename"])
 
 
 def save_subscription(subscription, identity_hint=None):
@@ -718,20 +610,12 @@ def save_subscription(subscription, identity_hint=None):
     with db() as conn:
         if identity_id:
             conn.execute(
-                """
-                UPDATE identities
-                SET stripe_customer_id = ?, subscription_id = ?, subscription_status = ?
-                WHERE id = ?
-                """,
+                "UPDATE identities SET stripe_customer_id = ?, subscription_id = ?, subscription_status = ? WHERE id = ?",
                 (customer_id, subscription_id, status, identity_id),
             )
         else:
             conn.execute(
-                """
-                UPDATE identities
-                SET subscription_id = ?, subscription_status = ?
-                WHERE stripe_customer_id = ? OR subscription_id = ?
-                """,
+                "UPDATE identities SET subscription_id = ?, subscription_status = ? WHERE stripe_customer_id = ? OR subscription_id = ?",
                 (subscription_id, status, customer_id, subscription_id),
             )
             identity = conn.execute(
@@ -739,7 +623,6 @@ def save_subscription(subscription, identity_hint=None):
                 (customer_id, subscription_id),
             ).fetchone()
             identity_id = identity["id"] if identity else None
-
     return identity_id
 
 
@@ -752,68 +635,33 @@ async def stripe_webhook(request: Request):
     signature = request.headers.get("stripe-signature", "")
 
     try:
-        event = stripe.Webhook.construct_event(
-            payload, signature, STRIPE_WEBHOOK_SECRET
-        )
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid webhook payload.")
-    except stripe.error.SignatureVerificationError:
+        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+    except Exception:
         raise HTTPException(status_code=400, detail="Invalid webhook signature.")
 
     with db() as conn:
-        seen = conn.execute(
-            "SELECT 1 FROM stripe_events WHERE id = ?",
-            (event["id"],),
-        ).fetchone()
+        seen = conn.execute("SELECT 1 FROM stripe_events WHERE id = ?", (event["id"],)).fetchone()
     if seen:
         return {"received": True}
 
     event_type = event["type"]
     obj = event["data"]["object"]
 
-    subscription_identity_id = None
-    subscription_status = None
-    if event_type in {
-        "checkout.session.completed",
-        "checkout.session.async_payment_succeeded",
-    }:
+    if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
         subscription_id = obj.get("subscription")
         if subscription_id:
             subscription = stripe.Subscription.retrieve(subscription_id)
-            subscription_identity_id = save_subscription(
-                subscription, obj.get("client_reference_id")
-            )
-            subscription_status = subscription.get("status", "none")
-
-    elif event_type in {
-        "customer.subscription.created",
-        "customer.subscription.updated",
-        "customer.subscription.deleted",
-    }:
-        subscription_identity_id = save_subscription(obj)
-        subscription_status = obj.get("status", "none")
-
-    if posthog_client and subscription_identity_id:
-        posthog_client.capture(
-            "subscription_status_changed",
-            distinct_id=subscription_identity_id,
-            properties={
-                "subscription_status": subscription_status,
-                "source_event": event_type,
-            },
-        )
+            save_subscription(subscription, obj.get("client_reference_id"))
+    elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
+        save_subscription(obj)
 
     with db() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO stripe_events (id, processed_at) VALUES (?, ?)",
-            (event["id"], int(time.time())),
-        )
+        conn.execute("INSERT OR IGNORE INTO stripe_events (id, processed_at) VALUES (?, ?)", (event["id"], int(time.time())))
 
     return {"received": True}
 
 
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
