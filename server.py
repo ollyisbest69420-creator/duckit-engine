@@ -1,9 +1,9 @@
 import atexit
-import asyncio
 import logging
 import os
 import shutil
 import sqlite3
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager
@@ -16,14 +16,21 @@ import soundfile as sf
 import stripe
 import torch
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
-from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
-from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
-from posthog import Posthog
-from posthog.integrations.asgi import PosthogASGIMiddleware
+try:
+    from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+    from posthog import Posthog
+    from posthog.integrations.asgi import PosthogASGIMiddleware
+    OBSERVABILITY_AVAILABLE = True
+except ImportError:
+    # Billing and audio processing must remain available when optional analytics
+    # packages are absent or deliberately omitted from a minimal deployment.
+    OBSERVABILITY_AVAILABLE = False
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logging.basicConfig(level=logging.INFO)
@@ -36,6 +43,7 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "private-outputs"
 DB_PATH = DATA_DIR / "duckit.sqlite3"
 MODEL_PATH = BASE_DIR / "models" / "silero_vad.jit"
+FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 
 MAX_FREE_EXPORTS = 3
 MAX_SOURCE_SECONDS = 60 * 60
@@ -44,16 +52,14 @@ OUTPUT_TTL_SECONDS = 24 * 60 * 60
 COOKIE_NAME = "duckit_identity"
 COOKIE_MAX_AGE = 365 * 24 * 60 * 60
 
-APP_BASE_URL = os.environ.get("APP_BASE_URL", "").rstrip("/")
-APP_SESSION_SECRET = os.environ.get("APP_SESSION_SECRET", "")
-STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-STRIPE_PRICE_PRO_MONTHLY = os.environ.get("STRIPE_PRICE_PRO_MONTHLY", "")
-COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
-
-
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    app_base_url: str = ""
+    app_session_secret: str = ""
+    stripe_secret_key: str = ""
+    stripe_webhook_secret: str = ""
+    stripe_price_pro_monthly: str = ""
+    cookie_secure: bool | None = None
     posthog_project_token: str = ""
     posthog_host: str = ""
     environment: str = "development"
@@ -65,12 +71,19 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+APP_BASE_URL = settings.app_base_url.rstrip("/")
+APP_SESSION_SECRET = settings.app_session_secret
+STRIPE_SECRET_KEY = settings.stripe_secret_key
+STRIPE_WEBHOOK_SECRET = settings.stripe_webhook_secret
+STRIPE_PRICE_PRO_MONTHLY = settings.stripe_price_pro_monthly
+# HTTPS deployments get secure cookies by default; localhost remains usable.
+COOKIE_SECURE = settings.cookie_secure if settings.cookie_secure is not None else APP_BASE_URL.startswith("https://")
 posthog_log_provider = None
 posthog_log_logger = logging.getLogger("duckit.posthog_logs")
 posthog_log_logger.setLevel(logging.INFO)
 posthog_log_logger.propagate = False
 
-if settings.posthog_project_token and settings.posthog_host:
+if settings.posthog_project_token and settings.posthog_host and OBSERVABILITY_AVAILABLE:
     posthog_log_provider = LoggerProvider()
     posthog_log_exporter = OTLPLogExporter(
         endpoint=f"{settings.posthog_host.rstrip('/')}/i/v1/logs",
@@ -82,13 +95,15 @@ if settings.posthog_project_token and settings.posthog_host:
     posthog_log_logger.addHandler(LoggingHandler(logger_provider=posthog_log_provider))
 
 posthog_client = None
-if settings.posthog_project_token and settings.posthog_host:
+if settings.posthog_project_token and settings.posthog_host and OBSERVABILITY_AVAILABLE:
     posthog_client = Posthog(
         settings.posthog_project_token,
         host=settings.posthog_host,
         enable_exception_autocapture=True,
     )
     atexit.register(posthog_client.shutdown)
+elif settings.posthog_project_token and settings.posthog_host:
+    logger.warning("PostHog is configured but its optional packages are not installed; analytics is disabled")
 
 if not APP_BASE_URL or not APP_SESSION_SECRET:
     raise RuntimeError("APP_BASE_URL and APP_SESSION_SECRET must be set.")
@@ -99,32 +114,46 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
 stripe.api_key = STRIPE_SECRET_KEY
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
-ml_models = {}
+vad_model: torch.jit.ScriptModule | None = None
+vad_load_error: str | None = None
+# Silero VAD carries recurrent state between chunks. Serialising access prevents
+# concurrent jobs from contaminating each other's speech decisions.
+vad_lock = threading.Lock()
 
-def load_vad_model_safely():
+
+def load_vad_model_safely() -> bool:
+    """Load only the bundled TorchScript model; never use torch.hub/GitHub."""
+    global vad_model, vad_load_error
     torch.set_num_threads(1)
     try:
-        logger.info("Loading local Silero VAD model from %s...", MODEL_PATH)
-        if not MODEL_PATH.exists():
+        if not MODEL_PATH.is_file():
             raise FileNotFoundError(f"Local VAD model file not found at {MODEL_PATH}")
-        
-        model = torch.jit.load(str(MODEL_PATH))
+        logger.info("Loading local Silero VAD model from %s", MODEL_PATH)
+        model = torch.jit.load(str(MODEL_PATH), map_location="cpu")
         model.eval()
-        ml_models["vad_model"] = model
-        logger.info("Local Silero VAD model loaded successfully.")
-    except Exception:
-        logger.exception("Critical error: Failed to load local Silero VAD model.")
+        vad_model = model
+        vad_load_error = None
+        logger.info("Local Silero VAD model loaded successfully")
+        return True
+    except Exception as exc:
+        vad_model = None
+        vad_load_error = str(exc)
+        logger.exception("Failed to load the local Silero VAD model")
+        return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     load_vad_model_safely()
+    if not FFMPEG_AVAILABLE:
+        logger.error("FFmpeg executable was not found on PATH")
     yield
     if posthog_client:
         try:
             posthog_client.flush()
         except Exception:
             logger.exception("Could not flush PostHog events during shutdown")
-    ml_models.clear()
+    global vad_model
+    vad_model = None
 
 
 app = FastAPI(
@@ -316,23 +345,77 @@ async def save_upload(upload: UploadFile, path: Path):
         await upload.close()
 
 
-def prepare_vad_audio(input_path: Path, output_path: Path):
+def prepare_vad_audio(input_path: Path, output_path: Path, duration: float | None = None):
+    output_kwargs = {"ar": 16000, "ac": 1, "format": "wav", "acodec": "pcm_s16le"}
+    if duration is not None:
+        output_kwargs["t"] = duration
     (
         ffmpeg
         .input(str(input_path))
-        .output(str(output_path), ar=16000, ac=1, format="wav")
+        .output(str(output_path), **output_kwargs)
         .run(overwrite_output=True, quiet=True)
     )
 
 
-def apply_ducking_vectorized(music_audio, music_sr, speech_timestamps, duck_vol=0.15, fade_duration=0.05):
+def detect_speech_samples(vad_path: Path, threshold: float = 0.5) -> list[tuple[int, int]]:
+    """Return speech regions in samples at the fixed 16 kHz VAD rate."""
+    if vad_model is None:
+        raise RuntimeError("VAD model is unavailable")
+    samples, sample_rate = sf.read(str(vad_path), dtype="float32", always_2d=False)
+    if sample_rate != 16000:
+        raise RuntimeError(f"Expected 16 kHz VAD input, got {sample_rate} Hz")
+    wav = torch.from_numpy(np.asarray(samples, dtype=np.float32).reshape(-1))
+    if not len(wav):
+        return []
+
+    regions: list[tuple[int, int]] = []
+    chunk_size = 512  # Required frame size for the 16 kHz Silero JIT model.
+    in_speech = False
+    start_sample = 0
+    # reset_states() and inference must be one critical section: this model is stateful.
+    with vad_lock, torch.inference_mode():
+        if hasattr(vad_model, "reset_states"):
+            vad_model.reset_states()
+        for offset in range(0, len(wav), chunk_size):
+            chunk = wav[offset : offset + chunk_size]
+            # Padding ensures a final partial frame is evaluated instead of dropped.
+            if len(chunk) < chunk_size:
+                chunk = torch.nn.functional.pad(chunk, (0, chunk_size - len(chunk)))
+            probability = float(vad_model(chunk, 16000).item())
+            if probability >= threshold and not in_speech:
+                in_speech = True
+                start_sample = offset
+            elif probability < threshold and in_speech:
+                regions.append((start_sample, min(offset, len(wav))))
+                in_speech = False
+    if in_speech:
+        regions.append((start_sample, len(wav)))
+    return regions
+
+
+def merge_regions(regions: list[tuple[int, int]], join_samples: int) -> list[tuple[int, int]]:
+    """Join neighbouring VAD frames so fades never restore volume during speech."""
+    merged: list[list[int]] = []
+    for start, end in regions:
+        if end <= start:
+            continue
+        if merged and start <= merged[-1][1] + join_samples:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
+
+
+def apply_ducking_vectorized(music_audio, music_sr, speech_regions, duck_vol=0.15, fade_duration=0.05):
+    """Apply 16 kHz VAD sample regions to arbitrary-rate mono or multi-channel music."""
     envelope = np.ones(len(music_audio), dtype=np.float32)
-    fade_samples = int(fade_duration * music_sr)
+    fade_samples = max(1, round(fade_duration * music_sr))
     scale = music_sr / 16000.0
 
-    for ts in speech_timestamps:
-        start = int(ts.get('start', 0) * scale)
-        end = int(ts.get('end', 0) * scale)
+    for speech_start, speech_end in merge_regions(speech_regions, round(fade_duration * 16000)):
+        # VAD values are samples at 16 kHz, not seconds. Convert exactly once.
+        start = round(speech_start * scale)
+        end = round(speech_end * scale)
         
         start = max(0, min(start, len(music_audio)))
         end = max(0, min(end, len(music_audio)))
@@ -343,18 +426,48 @@ def apply_ducking_vectorized(music_audio, music_sr, speech_timestamps, duck_vol=
         
         fade_out_start = max(0, start - fade_samples)
         if start > fade_out_start:
-            ramp_out = np.linspace(1.0, duck_vol, start - fade_out_start)
+            ramp_out = np.linspace(1.0, duck_vol, start - fade_out_start, endpoint=False, dtype=np.float32)
             envelope[fade_out_start:start] = ramp_out
             
         fade_in_end = min(len(music_audio), end + fade_samples)
         if fade_in_end > end:
-            ramp_in = np.linspace(duck_vol, 1.0, fade_in_end - end)
+            ramp_in = np.linspace(duck_vol, 1.0, fade_in_end - end, endpoint=False, dtype=np.float32)
             envelope[end:fade_in_end] = ramp_in
 
     if music_audio.ndim > 1:
         envelope = envelope[:, np.newaxis]
         
     return music_audio * envelope
+
+
+def render_ducked_music(music_path: Path, vad_regions: list[tuple[int, int]], output_path: Path, duck_vol: float):
+    """Decode through FFmpeg, then preserve the decoded track's sample rate/channels."""
+    pcm_path = output_path.with_name(f"{output_path.stem}-source.wav")
+    try:
+        ffmpeg.input(str(music_path)).output(
+            str(pcm_path), acodec="pcm_s16le", format="wav"
+        ).run(overwrite_output=True, quiet=True)
+        music_data, music_sr = sf.read(str(pcm_path), dtype="float32", always_2d=False)
+        ducked = apply_ducking_vectorized(music_data, music_sr, vad_regions, duck_vol=duck_vol)
+        sf.write(str(output_path), ducked, music_sr, subtype="PCM_16")
+    finally:
+        pcm_path.unlink(missing_ok=True)
+
+
+def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, free_job: bool):
+    """Run the final FFmpeg encode off the event loop."""
+    mixed = ffmpeg.filter(
+        [ffmpeg.input(str(ducked_music_path)), ffmpeg.input(str(dialogue_path))],
+        "amix",
+        inputs=2,
+        duration="longest",
+        dropout_transition=0.5,
+        normalize=0,
+    )
+    output_kwargs = {"acodec": "libmp3lame", "audio_bitrate": "320k"}
+    if free_job:
+        output_kwargs["t"] = 180
+    ffmpeg.output(mixed, str(output_path), **output_kwargs).run(overwrite_output=True, quiet=True)
 
 
 @app.get("/", include_in_schema=False)
@@ -364,6 +477,16 @@ def homepage():
 
 @app.get("/api/health")
 def health_check():
+    if not FFMPEG_AVAILABLE:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "engine": "unavailable", "detail": "FFmpeg is not installed or not on PATH."},
+        )
+    if vad_model is None:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "engine": "unavailable", "detail": vad_load_error},
+        )
     return {"status": "online", "engine": "ready"}
 
 
@@ -374,15 +497,33 @@ def billing_status(identity_id: str = Depends(current_identity)):
 
 @app.post("/api/billing/verify")
 def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depends(current_identity)):
+    """Synchronously reconcile a successful Checkout return before the webhook arrives."""
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(status_code=503, detail="Billing is not configured.")
     try:
-        session = stripe.checkout.Session.retrieve(session_id)
-        if session.get("payment_status") == "paid" or session.get("status") == "complete":
-            subscription_id = session.get("subscription")
-            if subscription_id:
-                subscription = stripe.Subscription.retrieve(subscription_id)
-                save_subscription(subscription, identity_id)
-    except Exception:
-        logger.exception("Failed to verify checkout session")
+        session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"])
+    except Exception as exc:
+        logger.warning("Stripe rejected checkout-session verification: %s", exc)
+        raise HTTPException(status_code=502, detail="Could not verify the Checkout session.") from exc
+
+    user = user_row(identity_id)
+    expected_customer = user["stripe_customer_id"] if user else None
+    if (
+        session.get("mode") != "subscription"
+        or session.get("client_reference_id") != identity_id
+        or (expected_customer and session.get("customer") != expected_customer)
+    ):
+        # A Checkout Session ID must never be usable to grant a different browser Pro access.
+        raise HTTPException(status_code=403, detail="That Checkout session does not belong to this browser.")
+    if session.get("status") != "complete":
+        raise HTTPException(status_code=409, detail="Checkout has not completed yet.")
+
+    subscription = session.get("subscription")
+    if not subscription:
+        raise HTTPException(status_code=409, detail="Checkout did not create a subscription.")
+    if isinstance(subscription, str):
+        subscription = stripe.Subscription.retrieve(subscription)
+    save_subscription(subscription, identity_id)
     return entitlement_payload(identity_id)
 
 
@@ -450,11 +591,13 @@ async def duck_audio(
     output_path = OUTPUT_DIR / f"{run_id}.mp3"
 
     try:
+        if not FFMPEG_AVAILABLE:
+            raise HTTPException(status_code=503, detail="FFmpeg is not installed or not on PATH.")
         await save_upload(dialogue, dialogue_path)
         await save_upload(music, music_path)
 
-        dialogue_seconds = source_duration(dialogue_path)
-        music_seconds = source_duration(music_path)
+        dialogue_seconds = await run_in_threadpool(source_duration, dialogue_path)
+        music_seconds = await run_in_threadpool(source_duration, music_path)
         longest_source = max(dialogue_seconds, music_seconds)
         user = user_row(identity_id)
         pro_active = is_pro(user)
@@ -474,71 +617,23 @@ async def duck_audio(
                     },
                 )
 
-        prepare_vad_audio(dialogue_path, vad_path)
-        
-        model = ml_models.get("vad_model")
-        if not model:
-            load_vad_model_safely()
-            model = ml_models.get("vad_model")
-            
-        if not model:
-            raise HTTPException(status_code=503, detail="VAD model failed to initialize.")
+        if vad_model is None:
+            raise HTTPException(status_code=503, detail="The VAD engine is unavailable. Please try again shortly.")
 
-        data, _ = sf.read(vad_path)
-        wav = torch.tensor(data, dtype=torch.float32)
-        
-        # Self-contained offline VAD chunk evaluation (bypasses missing helper dependencies)
-        timestamps = []
+        # Free exports are always capped server-side; the browser's trim choice is
+        # a convenience, never the enforcement mechanism.
+        processing_duration = min(longest_source, 180.0) if free_job else None
+        await run_in_threadpool(prepare_vad_audio, dialogue_path, vad_path, processing_duration)
         try:
-            model.reset_states()
-            chunk_size = 512
-            audio_len = len(wav)
-            in_speech = False
-            start_sample = 0
-            
-            with torch.no_grad():
-                for i in range(0, audio_len - chunk_size, chunk_size):
-                    chunk = wav[i:i + chunk_size]
-                    out = model(chunk, 16000)
-                    prob = out.item() if hasattr(out, 'item') else float(out)
-                    
-                    if prob > 0.5 and not in_speech:
-                        in_speech = True
-                        start_sample = i
-                    elif prob <= 0.5 and in_speech:
-                        in_speech = False
-                        end_sample = i
-                        timestamps.append({"start": start_sample, "end": end_sample})
-                if in_speech:
-                    timestamps.append({"start": start_sample, "end": audio_len})
-        except Exception:
-            logger.exception("VAD chunk inference error, defaulting to full audio ducking envelope")
-            
-        if not timestamps:
-            timestamps = [{"start": 0, "end": len(wav)}]
+            speech_regions = await run_in_threadpool(detect_speech_samples, vad_path)
+            await run_in_threadpool(
+                render_ducked_music, music_path, speech_regions, ducked_music_path, duck_vol
+            )
+        except Exception as exc:
+            logger.exception("Local VAD/audio rendering failed")
+            raise HTTPException(status_code=500, detail="Audio analysis failed. Please try different audio files.") from exc
 
-        music_data, music_sr = sf.read(str(music_path))
-        ducked_music_array = apply_ducking_vectorized(
-            music_data, music_sr, timestamps, duck_vol=duck_vol
-        )
-        sf.write(str(ducked_music_path), ducked_music_array, music_sr)
-
-        input_dialogue = ffmpeg.input(str(dialogue_path))
-        input_ducked_music = ffmpeg.input(str(ducked_music_path))
-
-        mixed = ffmpeg.filter(
-            [input_ducked_music, input_dialogue],
-            "amix",
-            inputs=2,
-            duration="first",
-            dropout_transition=0.5,
-        )
-
-        output_kwargs = {"acodec": "libmp3lame", "audio_bitrate": "320k"}
-        if free_job and trim_seconds:
-            output_kwargs["t"] = min(180, trim_seconds)
-
-        ffmpeg.output(mixed, str(output_path), **output_kwargs).run(overwrite_output=True, quiet=True)
+        await run_in_threadpool(mix_audio, dialogue_path, ducked_music_path, output_path, free_job)
 
         if not output_path.exists():
             raise RuntimeError("Output file was not created.")

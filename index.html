@@ -806,45 +806,70 @@
             link.remove();
         }
 
-        async function refreshBilling(retries = 3) {
-            for (let i = 0; i < retries; i++) {
-                try {
-                    const response = await fetch('/api/billing/status', {
-                        credentials: 'same-origin'
-                    });
-                    if (!response.ok) continue;
-
-                    billing = await response.json();
-                    if (typeof billing.free_exports_used === 'number') {
-                        exportsUsed = billing.free_exports_used;
-                        localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
-                    }
-                    planBadge.hidden = false;
-
-                    if (billing.pro) {
-                        planBadge.textContent = 'Pro · Unlimited';
-                        planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
-                        upgradeBtn.textContent = 'Manage plan';
-                        planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
-                        renderTrialMeter();
-                        return; // Successfully synced pro status
-                    } else {
-                        const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
-                        planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
-                        planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
-                        upgradeBtn.textContent = 'Upgrade to Pro';
-                        planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
-                    }
-                    renderTrialMeter();
-                    
-                    if (i < retries - 1) {
-                        await new Promise(r => setTimeout(r, 2000)); // Wait 2s for webhook to land if just returning from checkout
-                    }
-                } catch (_) {
-                    if (i < retries - 1) await new Promise(r => setTimeout(r, 2000));
-                }
+        function renderBilling() {
+            if (typeof billing.free_exports_used === 'number') {
+                exportsUsed = billing.free_exports_used;
+                localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
+            }
+            planBadge.hidden = false;
+            if (billing.pro) {
+                planBadge.textContent = 'Pro · Unlimited';
+                planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
+                upgradeBtn.textContent = 'Manage plan';
+                planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
+            } else {
+                const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
+                planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
+                planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
+                upgradeBtn.textContent = 'Upgrade to Pro';
+                planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
             }
             renderTrialMeter();
+        }
+
+        async function refreshBilling() {
+            try {
+                const response = await fetch('/api/billing/status', { credentials: 'same-origin' });
+                if (!response.ok) throw new Error('Could not load billing status.');
+                billing = await response.json();
+                renderBilling();
+                return billing;
+            } catch (error) {
+                // Keep the editor usable if a transient status request fails.
+                renderTrialMeter();
+                return null;
+            }
+        }
+
+        async function verifyCheckoutReturn(sessionId) {
+            const payload = new URLSearchParams({ session_id: sessionId });
+            upgradeBtn.disabled = true;
+            upgradeBtn.textContent = 'Activating…';
+            try {
+                const response = await fetch('/api/billing/verify', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: payload.toString(),
+                });
+                let data = {};
+                try { data = await response.json(); } catch (_) {}
+                if (!response.ok) throw new Error(formatDetail(data.detail));
+                billing = data;
+                renderBilling();
+                notify(billing.pro ? 'Pro is active. Thanks for subscribing!' : 'Payment is complete; subscription activation is still pending.');
+            } catch (error) {
+                // End the UI loading state even when Stripe is temporarily unavailable.
+                notify(error.message || 'We could not verify the payment yet. Please refresh shortly.');
+                await refreshBilling();
+            } finally {
+                upgradeBtn.disabled = false;
+                // Remove the one-time Checkout ID so refresh/back cannot re-submit it.
+                const url = new URL(window.location.href);
+                url.searchParams.delete('checkout');
+                url.searchParams.delete('session_id');
+                window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+            }
         }
 
         async function goToBilling() {
@@ -1060,11 +1085,17 @@
         refreshHeader();
         upgradeBtn.addEventListener('click', goToBilling);
 
-        const checkoutState = new URLSearchParams(window.location.search).get('checkout');
-        if (checkoutState === 'success') {
+        const checkoutParams = new URLSearchParams(window.location.search);
+        const checkoutState = checkoutParams.get('checkout');
+        const checkoutSessionId = checkoutParams.get('session_id');
+        if (checkoutState === 'success' && checkoutSessionId) {
             trackEvent('subscription_started');
             notify('Payment received. Activating Pro…');
-            refreshBilling(5); // Retry 5 times to wait for webhook sync
+            verifyCheckoutReturn(checkoutSessionId);
+        } else if (checkoutState === 'success') {
+            // A malformed return must not leave a persistent loading message.
+            notify('Payment return was missing its verification ID. Please contact support if you were charged.');
+            refreshBilling();
         } else {
             refreshBilling();
         }
