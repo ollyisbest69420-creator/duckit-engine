@@ -49,6 +49,9 @@ MAX_FREE_EXPORTS = 3
 MAX_SOURCE_SECONDS = 60 * 60
 MAX_UPLOAD_BYTES = 250 * 1024 * 1024
 OUTPUT_TTL_SECONDS = 24 * 60 * 60
+PCM_BLOCK_FRAMES = 65_536
+VAD_SAMPLE_RATE = 16_000
+VAD_FRAME_SAMPLES = 512
 COOKIE_NAME = "duckit_identity"
 COOKIE_MAX_AGE = 365 * 24 * 60 * 60
 
@@ -184,6 +187,8 @@ if allowed_origins:
 def db():
     connection = sqlite3.connect(DB_PATH, timeout=10)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute("PRAGMA busy_timeout = 10000")
     try:
         yield connection
         connection.commit()
@@ -296,6 +301,41 @@ def entitlement_payload(identity_id: str):
     }
 
 
+def require_billing_config(require_price: bool = False) -> None:
+    if not STRIPE_SECRET_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "billing_unavailable", "message": "Stripe is not configured on this server."},
+        )
+    if not APP_BASE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "billing_unavailable", "message": "The public application URL is not configured."},
+        )
+    if require_price and not STRIPE_PRICE_PRO_MONTHLY.startswith("price_"):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "billing_unavailable", "message": "The Pro monthly Stripe price is not configured."},
+        )
+
+
+def stripe_id(value) -> str | None:
+    """Return an ID from a Stripe string or expanded object without assuming either shape."""
+    if isinstance(value, str):
+        return value
+    if value is not None and hasattr(value, "get"):
+        return value.get("id")
+    return None
+
+
+def stripe_error(operation: str, exc: Exception) -> HTTPException:
+    logger.exception("Stripe failed while %s", operation)
+    return HTTPException(
+        status_code=502,
+        detail={"code": "stripe_error", "message": f"Stripe could not complete {operation}. Please try again.", "operation": operation},
+    )
+
+
 def cleanup_expired_outputs():
     now = int(time.time())
     with db() as conn:
@@ -329,6 +369,27 @@ def source_duration(path: Path) -> float:
     return duration
 
 
+class AudioPipelineError(RuntimeError):
+    """A safe, step-specific error for a failing external audio operation."""
+
+    def __init__(self, step: str, message: str):
+        super().__init__(message)
+        self.step = step
+
+
+def run_ffmpeg(stream, step: str) -> None:
+    """Run FFmpeg and retain its diagnostic output in server logs, never the client."""
+    try:
+        stream.run(overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
+    except ffmpeg.Error as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace").strip()
+        logger.error("FFmpeg failed during %s: %s", step, stderr[-4_000:] or repr(exc))
+        raise AudioPipelineError(step, "FFmpeg could not decode or encode the audio.") from exc
+    except OSError as exc:
+        logger.exception("Could not start FFmpeg during %s", step)
+        raise AudioPipelineError(step, "FFmpeg is unavailable.") from exc
+
+
 async def save_upload(upload: UploadFile, path: Path):
     total = 0
     try:
@@ -349,12 +410,12 @@ def prepare_vad_audio(input_path: Path, output_path: Path, duration: float | Non
     output_kwargs = {"ar": 16000, "ac": 1, "format": "wav", "acodec": "pcm_s16le"}
     if duration is not None:
         output_kwargs["t"] = duration
-    (
-        ffmpeg
-        .input(str(input_path))
-        .output(str(output_path), **output_kwargs)
-        .run(overwrite_output=True, quiet=True)
+    run_ffmpeg(
+        ffmpeg.input(str(input_path)).output(str(output_path), **output_kwargs),
+        "preparing 16 kHz VAD audio",
     )
+    if not output_path.is_file() or output_path.stat().st_size < 44:
+        raise AudioPipelineError("preparing 16 kHz VAD audio", "The converted dialogue track is empty.")
 
 
 def detect_speech_samples(vad_path: Path, threshold: float = 0.5) -> list[tuple[int, int]]:
@@ -362,14 +423,14 @@ def detect_speech_samples(vad_path: Path, threshold: float = 0.5) -> list[tuple[
     if vad_model is None:
         raise RuntimeError("VAD model is unavailable")
     samples, sample_rate = sf.read(str(vad_path), dtype="float32", always_2d=False)
-    if sample_rate != 16000:
-        raise RuntimeError(f"Expected 16 kHz VAD input, got {sample_rate} Hz")
+    if sample_rate != VAD_SAMPLE_RATE:
+        raise AudioPipelineError("reading VAD audio", f"Expected {VAD_SAMPLE_RATE} Hz dialogue audio, got {sample_rate} Hz")
     wav = torch.from_numpy(np.asarray(samples, dtype=np.float32).reshape(-1))
     if not len(wav):
         return []
 
     regions: list[tuple[int, int]] = []
-    chunk_size = 512  # Required frame size for the 16 kHz Silero JIT model.
+    chunk_size = VAD_FRAME_SAMPLES  # Required frame size for the 16 kHz Silero JIT model.
     in_speech = False
     start_sample = 0
     # reset_states() and inference must be one critical section: this model is stateful.
@@ -406,50 +467,76 @@ def merge_regions(regions: list[tuple[int, int]], join_samples: int) -> list[tup
     return [(start, end) for start, end in merged]
 
 
-def apply_ducking_vectorized(music_audio, music_sr, speech_regions, duck_vol=0.15, fade_duration=0.05):
-    """Apply 16 kHz VAD sample regions to arbitrary-rate mono or multi-channel music."""
-    envelope = np.ones(len(music_audio), dtype=np.float32)
-    fade_samples = max(1, round(fade_duration * music_sr))
-    scale = music_sr / 16000.0
+def music_regions(vad_regions: list[tuple[int, int]], music_sr: int, fade_duration: float) -> list[tuple[int, int]]:
+    """Map VAD's fixed 16 kHz sample coordinates to the music stream exactly once."""
+    scale = music_sr / VAD_SAMPLE_RATE
+    return [
+        (round(start * scale), round(end * scale))
+        for start, end in merge_regions(vad_regions, round(fade_duration * VAD_SAMPLE_RATE))
+        if end > start
+    ]
 
-    for speech_start, speech_end in merge_regions(speech_regions, round(fade_duration * 16000)):
-        # VAD values are samples at 16 kHz, not seconds. Convert exactly once.
-        start = round(speech_start * scale)
-        end = round(speech_end * scale)
-        
-        start = max(0, min(start, len(music_audio)))
-        end = max(0, min(end, len(music_audio)))
-        if start >= end:
-            continue
-        
-        envelope[start:end] = duck_vol
-        
-        fade_out_start = max(0, start - fade_samples)
-        if start > fade_out_start:
-            ramp_out = np.linspace(1.0, duck_vol, start - fade_out_start, endpoint=False, dtype=np.float32)
-            envelope[fade_out_start:start] = ramp_out
-            
-        fade_in_end = min(len(music_audio), end + fade_samples)
-        if fade_in_end > end:
-            ramp_in = np.linspace(duck_vol, 1.0, fade_in_end - end, endpoint=False, dtype=np.float32)
-            envelope[end:fade_in_end] = ramp_in
 
-    if music_audio.ndim > 1:
-        envelope = envelope[:, np.newaxis]
-        
-    return music_audio * envelope
+def gain_curve_for_block(
+    block_start: int,
+    frame_count: int,
+    regions: list[tuple[int, int]],
+    fade_samples: int,
+    duck_vol: float,
+) -> np.ndarray:
+    """Return a bounded one-dimensional gain curve for exactly one PCM block."""
+    gain = np.ones(frame_count, dtype=np.float32)
+    block_end = block_start + frame_count
+    for speech_start, speech_end in regions:
+        # Fade down before speech, hold while speech is present, then fade up.
+        segments = (
+            (speech_start - fade_samples, speech_start, 1.0, duck_vol),
+            (speech_start, speech_end, duck_vol, duck_vol),
+            (speech_end, speech_end + fade_samples, duck_vol, 1.0),
+        )
+        for segment_start, segment_end, first_gain, last_gain in segments:
+            left, right = max(block_start, segment_start), min(block_end, segment_end)
+            if right <= left:
+                continue
+            positions = np.arange(left, right, dtype=np.float32)
+            span = max(1, segment_end - segment_start)
+            values = first_gain + (last_gain - first_gain) * ((positions - segment_start) / span)
+            local_left, local_right = left - block_start, right - block_start
+            # In a fade overlap, the quieter curve wins; never amplify source audio.
+            gain[local_left:local_right] = np.minimum(gain[local_left:local_right], values)
+    return np.clip(gain, duck_vol, 1.0)
 
 
 def render_ducked_music(music_path: Path, vad_regions: list[tuple[int, int]], output_path: Path, duck_vol: float):
-    """Decode through FFmpeg, then preserve the decoded track's sample rate/channels."""
+    """Stream music in bounded blocks: no whole-track matrices or shape mismatches."""
     pcm_path = output_path.with_name(f"{output_path.stem}-source.wav")
     try:
-        ffmpeg.input(str(music_path)).output(
-            str(pcm_path), acodec="pcm_s16le", format="wav"
-        ).run(overwrite_output=True, quiet=True)
-        music_data, music_sr = sf.read(str(pcm_path), dtype="float32", always_2d=False)
-        ducked = apply_ducking_vectorized(music_data, music_sr, vad_regions, duck_vol=duck_vol)
-        sf.write(str(output_path), ducked, music_sr, subtype="PCM_16")
+        run_ffmpeg(
+            ffmpeg.input(str(music_path)).output(str(pcm_path), acodec="pcm_s16le", format="wav"),
+            "decoding music for ducking",
+        )
+        with sf.SoundFile(str(pcm_path), mode="r") as source:
+            if source.samplerate <= 0 or source.channels <= 0 or source.frames <= 0:
+                raise AudioPipelineError("reading decoded music", "The music track contains no PCM audio.")
+            fade_samples = max(1, round(0.05 * source.samplerate))
+            regions = music_regions(vad_regions, source.samplerate, 0.05)
+            with sf.SoundFile(
+                str(output_path), mode="w", samplerate=source.samplerate,
+                channels=source.channels, format="WAV", subtype="PCM_16",
+            ) as destination:
+                frame_offset = 0
+                while True:
+                    block = source.read(PCM_BLOCK_FRAMES, dtype="float32", always_2d=True)
+                    if not len(block):
+                        break
+                    gain = gain_curve_for_block(frame_offset, len(block), regions, fade_samples, duck_vol)
+                    if gain.shape[0] != block.shape[0]:
+                        raise AudioPipelineError("applying ducking curve", "Gain curve did not match decoded audio frames.")
+                    ducked_block = block * gain[:, np.newaxis]
+                    if not np.isfinite(ducked_block).all():
+                        raise AudioPipelineError("applying ducking curve", "Decoded music contains non-finite samples.")
+                    destination.write(ducked_block)
+                    frame_offset += len(block)
     finally:
         pcm_path.unlink(missing_ok=True)
 
@@ -467,7 +554,7 @@ def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, f
     output_kwargs = {"acodec": "libmp3lame", "audio_bitrate": "320k"}
     if free_job:
         output_kwargs["t"] = 180
-    ffmpeg.output(mixed, str(output_path), **output_kwargs).run(overwrite_output=True, quiet=True)
+    run_ffmpeg(ffmpeg.output(mixed, str(output_path), **output_kwargs), "mixing and encoding output")
 
 
 @app.get("/", include_in_schema=False)
@@ -498,20 +585,20 @@ def billing_status(identity_id: str = Depends(current_identity)):
 @app.post("/api/billing/verify")
 def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depends(current_identity)):
     """Synchronously reconcile a successful Checkout return before the webhook arrives."""
-    if not STRIPE_SECRET_KEY:
-        raise HTTPException(status_code=503, detail="Billing is not configured.")
+    require_billing_config()
+    if not session_id.startswith("cs_"):
+        raise HTTPException(status_code=422, detail={"code": "invalid_checkout_session", "message": "Invalid Checkout Session ID."})
     try:
         session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"])
     except Exception as exc:
-        logger.warning("Stripe rejected checkout-session verification: %s", exc)
-        raise HTTPException(status_code=502, detail="Could not verify the Checkout session.") from exc
+        raise stripe_error("Checkout verification", exc) from exc
 
     user = user_row(identity_id)
     expected_customer = user["stripe_customer_id"] if user else None
     if (
         session.get("mode") != "subscription"
         or session.get("client_reference_id") != identity_id
-        or (expected_customer and session.get("customer") != expected_customer)
+        or (expected_customer and stripe_id(session.get("customer")) != expected_customer)
     ):
         # A Checkout Session ID must never be usable to grant a different browser Pro access.
         raise HTTPException(status_code=403, detail="That Checkout session does not belong to this browser.")
@@ -522,23 +609,37 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
     if not subscription:
         raise HTTPException(status_code=409, detail="Checkout did not create a subscription.")
     if isinstance(subscription, str):
-        subscription = stripe.Subscription.retrieve(subscription)
-    save_subscription(subscription, identity_id)
+        try:
+            subscription = stripe.Subscription.retrieve(subscription)
+        except Exception as exc:
+            raise stripe_error("subscription activation", exc) from exc
+    try:
+        save_subscription(subscription, identity_id)
+    except (sqlite3.Error, ValueError) as exc:
+        logger.exception("Could not persist verified Stripe subscription")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "billing_state_error", "message": "Payment was verified but subscription access could not be saved. Please contact support."},
+        ) from exc
     return entitlement_payload(identity_id)
 
 
 @app.post("/api/billing/checkout")
 def create_checkout(identity_id: str = Depends(current_identity)):
-    if not STRIPE_SECRET_KEY or not STRIPE_PRICE_PRO_MONTHLY:
-        raise HTTPException(status_code=503, detail="Billing is not configured.")
+    require_billing_config(require_price=True)
 
     user = user_row(identity_id)
+    if user is None:
+        raise HTTPException(status_code=401, detail={"code": "identity_missing", "message": "Your browser session could not be loaded. Refresh and try again."})
     if is_pro(user):
         raise HTTPException(status_code=409, detail="Your Pro subscription is already active.")
 
     customer_id = user["stripe_customer_id"]
     if not customer_id:
-        customer = stripe.Customer.create(metadata={"duckit_identity_id": identity_id})
+        try:
+            customer = stripe.Customer.create(metadata={"duckit_identity_id": identity_id})
+        except Exception as exc:
+            raise stripe_error("customer setup", exc) from exc
         customer_id = customer.id
         with db() as conn:
             conn.execute(
@@ -546,30 +647,39 @@ def create_checkout(identity_id: str = Depends(current_identity)):
                 (customer_id, identity_id),
             )
 
-    checkout = stripe.checkout.Session.create(
-        mode="subscription",
-        customer=customer_id,
-        client_reference_id=identity_id,
-        line_items=[{"price": STRIPE_PRICE_PRO_MONTHLY, "quantity": 1}],
-        allow_promotion_codes=True,
-        success_url=f"{APP_BASE_URL}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
-        cancel_url=f"{APP_BASE_URL}/?checkout=cancelled",
-        metadata={"duckit_identity_id": identity_id},
-        subscription_data={"metadata": {"duckit_identity_id": identity_id}},
-    )
+    try:
+        checkout = stripe.checkout.Session.create(
+            mode="subscription",
+            customer=customer_id,
+            client_reference_id=identity_id,
+            line_items=[{"price": STRIPE_PRICE_PRO_MONTHLY, "quantity": 1}],
+            allow_promotion_codes=True,
+            success_url=f"{APP_BASE_URL}/?checkout=success&session_id={{CHECKOUT_SESSION_ID}}",
+            cancel_url=f"{APP_BASE_URL}/?checkout=cancelled",
+            metadata={"duckit_identity_id": identity_id},
+            subscription_data={"metadata": {"duckit_identity_id": identity_id}},
+        )
+    except Exception as exc:
+        raise stripe_error("Checkout creation", exc) from exc
+    if not checkout.url:
+        raise HTTPException(status_code=502, detail={"code": "stripe_error", "message": "Stripe did not return a Checkout URL."})
     return {"url": checkout.url}
 
 
 @app.post("/api/billing/portal")
 def create_billing_portal(identity_id: str = Depends(current_identity)):
+    require_billing_config()
     user = user_row(identity_id)
     if not user or not user["stripe_customer_id"]:
         raise HTTPException(status_code=404, detail="No billing account exists yet.")
 
-    portal = stripe.billing_portal.Session.create(
-        customer=user["stripe_customer_id"],
-        return_url=APP_BASE_URL,
-    )
+    try:
+        portal = stripe.billing_portal.Session.create(
+            customer=user["stripe_customer_id"],
+            return_url=APP_BASE_URL,
+        )
+    except Exception as exc:
+        raise stripe_error("billing portal creation", exc) from exc
     return {"url": portal.url}
 
 
@@ -581,8 +691,6 @@ async def duck_audio(
     trim_seconds: int | None = Form(None),
     identity_id: str = Depends(current_identity),
 ):
-    cleanup_expired_outputs()
-
     run_id = uuid.uuid4().hex
     dialogue_path = UPLOAD_DIR / f"{run_id}-dialogue.audio"
     music_path = UPLOAD_DIR / f"{run_id}-music.audio"
@@ -591,6 +699,7 @@ async def duck_audio(
     output_path = OUTPUT_DIR / f"{run_id}.mp3"
 
     try:
+        cleanup_expired_outputs()
         if not FFMPEG_AVAILABLE:
             raise HTTPException(status_code=503, detail="FFmpeg is not installed or not on PATH.")
         await save_upload(dialogue, dialogue_path)
@@ -626,17 +735,20 @@ async def duck_audio(
         await run_in_threadpool(prepare_vad_audio, dialogue_path, vad_path, processing_duration)
         try:
             speech_regions = await run_in_threadpool(detect_speech_samples, vad_path)
+            logger.info("Audio job %s: VAD found %d speech regions", run_id, len(speech_regions))
             await run_in_threadpool(
                 render_ducked_music, music_path, speech_regions, ducked_music_path, duck_vol
             )
+        except AudioPipelineError:
+            raise
         except Exception as exc:
-            logger.exception("Local VAD/audio rendering failed")
-            raise HTTPException(status_code=500, detail="Audio analysis failed. Please try different audio files.") from exc
+            logger.exception("Audio job %s failed while analysing or ducking", run_id)
+            raise AudioPipelineError("applying ducking curve", "Audio analysis failed.") from exc
 
         await run_in_threadpool(mix_audio, dialogue_path, ducked_music_path, output_path, free_job)
 
-        if not output_path.exists():
-            raise RuntimeError("Output file was not created.")
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise AudioPipelineError("encoding output", "The encoder did not create an audio file.")
 
         job_id = uuid.uuid4().hex
         filename = "duckit-mix.mp3"
@@ -671,10 +783,29 @@ async def duck_audio(
     except HTTPException:
         output_path.unlink(missing_ok=True)
         raise
+    except AudioPipelineError as exc:
+        output_path.unlink(missing_ok=True)
+        logger.exception("Audio job %s failed at %s", run_id, exc.step)
+        raise HTTPException(
+            status_code=422 if exc.step.startswith("reading") else 500,
+            detail={
+                "code": "audio_processing_failed",
+                "message": "Could not process the supplied audio.",
+                "step": exc.step,
+                "request_id": run_id,
+            },
+        ) from exc
     except Exception:
         output_path.unlink(missing_ok=True)
-        logger.exception("Audio processing failed")
-        raise HTTPException(status_code=500, detail="Processing failed. Please try different audio files.")
+        logger.exception("Audio job %s failed unexpectedly", run_id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "audio_processing_failed",
+                "message": "The audio engine failed unexpectedly.",
+                "request_id": run_id,
+            },
+        )
     finally:
         for path in (dialogue_path, music_path, vad_path, ducked_music_path):
             path.unlink(missing_ok=True)
@@ -696,18 +827,22 @@ def download_job(job_id: str, response: Response, identity_id: str = Depends(cur
 
 
 def save_subscription(subscription, identity_hint=None):
-    metadata = subscription.get("metadata", {})
+    metadata = subscription.get("metadata", {}) or {}
     identity_id = identity_hint or metadata.get("duckit_identity_id")
-    customer_id = subscription.get("customer")
-    subscription_id = subscription.get("id")
+    customer_id = stripe_id(subscription.get("customer"))
+    subscription_id = stripe_id(subscription)
     status = subscription.get("status", "none")
+    if not subscription_id:
+        raise ValueError("Stripe returned a subscription without an ID")
 
     with db() as conn:
         if identity_id:
-            conn.execute(
-                "UPDATE identities SET stripe_customer_id = ?, subscription_id = ?, subscription_status = ? WHERE id = ?",
+            result = conn.execute(
+                "UPDATE identities SET stripe_customer_id = COALESCE(?, stripe_customer_id), subscription_id = ?, subscription_status = ? WHERE id = ?",
                 (customer_id, subscription_id, status, identity_id),
             )
+            if result.rowcount != 1:
+                raise ValueError("The Checkout browser identity no longer exists")
         else:
             conn.execute(
                 "UPDATE identities SET subscription_id = ?, subscription_status = ? WHERE stripe_customer_id = ? OR subscription_id = ?",
@@ -723,16 +858,17 @@ def save_subscription(subscription, identity_hint=None):
 
 @app.post("/api/stripe/webhook", include_in_schema=False)
 async def stripe_webhook(request: Request):
-    if not STRIPE_WEBHOOK_SECRET:
-        raise HTTPException(status_code=503, detail="Webhook is not configured.")
+    if not STRIPE_SECRET_KEY or not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail={"code": "billing_unavailable", "message": "Stripe webhooks are not configured."})
 
     payload = await request.body()
     signature = request.headers.get("stripe-signature", "")
 
     try:
         event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid webhook signature.")
+    except Exception as exc:
+        logger.warning("Rejected Stripe webhook with invalid signature: %s", exc)
+        raise HTTPException(status_code=400, detail={"code": "invalid_webhook", "message": "Invalid Stripe webhook signature."}) from exc
 
     with db() as conn:
         seen = conn.execute("SELECT 1 FROM stripe_events WHERE id = ?", (event["id"],)).fetchone()
@@ -743,12 +879,21 @@ async def stripe_webhook(request: Request):
     obj = event["data"]["object"]
 
     if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
-        subscription_id = obj.get("subscription")
+        subscription_id = stripe_id(obj.get("subscription"))
         if subscription_id:
-            subscription = stripe.Subscription.retrieve(subscription_id)
-            save_subscription(subscription, obj.get("client_reference_id"))
+            try:
+                subscription = await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
+                save_subscription(subscription, obj.get("client_reference_id"))
+            except Exception:
+                # Return a 5xx: Stripe will safely retry because the event has not been marked seen.
+                logger.exception("Could not apply Stripe checkout event %s", event["id"])
+                raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
-        save_subscription(obj)
+        try:
+            save_subscription(obj)
+        except Exception:
+            logger.exception("Could not apply Stripe subscription event %s", event["id"])
+            raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
 
     with db() as conn:
         conn.execute("INSERT OR IGNORE INTO stripe_events (id, processed_at) VALUES (?, ?)", (event["id"], int(time.time())))

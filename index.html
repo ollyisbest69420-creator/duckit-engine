@@ -789,7 +789,9 @@
 
         function formatDetail(detail) {
             if (typeof detail === 'string' && detail.trim()) return detail;
-            if (detail && typeof detail === 'object' && detail.message) return detail.message;
+            if (detail && typeof detail === 'object' && detail.message) {
+                return detail.request_id ? detail.message + ' (reference ' + detail.request_id + ')' : detail.message;
+            }
             if (Array.isArray(detail)) {
                 const text = detail.map((item) => item.msg || '').filter(Boolean).join(' ');
                 if (text) return text;
