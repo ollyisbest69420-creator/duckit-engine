@@ -1,3 +1,4 @@
+import atexit
 import asyncio
 import logging
 import os
@@ -18,6 +19,12 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Respon
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from posthog import Posthog
+from posthog.integrations.asgi import PosthogASGIMiddleware
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("duckit")
@@ -43,6 +50,61 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 STRIPE_PRICE_PRO_MONTHLY = os.environ.get("STRIPE_PRICE_PRO_MONTHLY", "")
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() == "true"
 
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment variables."""
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    posthog_project_token: str = ""
+    posthog_host: str = ""
+    environment: str = "development"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings()
+
+
+settings = get_settings()
+posthog_log_provider = None
+posthog_log_logger = logging.getLogger("duckit.posthog_logs")
+posthog_log_logger.setLevel(logging.INFO)
+posthog_log_logger.propagate = False
+
+if settings.posthog_project_token and settings.posthog_host:
+    posthog_log_provider = LoggerProvider()
+    posthog_log_exporter = OTLPLogExporter(
+        endpoint=f"{settings.posthog_host.rstrip('/')}/i/v1/logs",
+        headers={"Authorization": f"Bearer {settings.posthog_project_token}"},
+    )
+    posthog_log_provider.add_log_record_processor(
+        BatchLogRecordProcessor(posthog_log_exporter)
+    )
+    posthog_log_logger.addHandler(LoggingHandler(logger_provider=posthog_log_provider))
+
+posthog_client = None
+if settings.posthog_project_token and settings.posthog_host:
+    posthog_client = Posthog(
+        settings.posthog_project_token,
+        host=settings.posthog_host,
+        enable_exception_autocapture=True,
+    )
+    atexit.register(posthog_client.shutdown)
+elif settings.environment != "production":
+    missing_posthog_variable = (
+        "POSTHOG_PROJECT_TOKEN"
+        if not settings.posthog_project_token
+        else "POSTHOG_HOST"
+    )
+    logger.warning(
+        "%s variable required by PostHog is missing or un-configured, this causes "
+        "events to be silently missed. This error stops appearing once %s is configured",
+        missing_posthog_variable,
+        missing_posthog_variable,
+    )
+
+
 if not APP_BASE_URL or not APP_SESSION_SECRET:
     raise RuntimeError("APP_BASE_URL and APP_SESSION_SECRET must be set.")
 
@@ -62,21 +124,42 @@ async def lifespan(app: FastAPI):
     
     # Load Silero VAD once at server boot with onnx=True for 3x-5x faster CPU inference
     logger.info("Loading Silero VAD model into RAM...")
-    model, utils = torch.hub.load(
-        repo_or_dir="snakers4/silero-vad",
-        model="silero_vad",
-        force_reload=False,
-        onnx=True,
-    )
-    ml_models["vad_model"] = model
-    ml_models["get_speech_timestamps"] = utils[0]
-    logger.info("Silero VAD model loaded successfully.")
+    try:
+        model, utils = torch.hub.load(
+            repo_or_dir="snakers4/silero-vad",
+            model="silero_vad",
+            force_reload=False,
+            onnx=True,
+        )
+        ml_models["vad_model"] = model
+        ml_models["get_speech_timestamps"] = utils[0]
+        logger.info("Silero VAD model loaded successfully.")
+    except Exception:
+        logger.exception("Failed to load Silero VAD model during startup")
     
     yield
     
+    if posthog_client:
+        try:
+            posthog_client.flush()
+        except Exception:
+            logger.exception("Could not flush PostHog events during shutdown")
+    if posthog_log_provider:
+        try:
+            posthog_log_provider.force_flush(timeout_millis=3_000)
+        except Exception:
+            logger.exception("Could not flush PostHog logs during shutdown")
     ml_models.clear()
 
-app = FastAPI(title="DuckIt API", description="Automated AI Audio Ducking", lifespan=lifespan)
+
+app = FastAPI(
+    title="DuckIt API",
+    description="Automated AI Audio Ducking",
+    lifespan=lifespan,
+)
+
+if posthog_client:
+    app.add_middleware(PosthogASGIMiddleware, client=posthog_client)
 
 allowed_origins = [
     origin.strip()
@@ -180,16 +263,18 @@ def current_identity(request: Request, response: Response) -> str:
         except (BadSignature, SignatureExpired):
             pass
 
-    if identity_id:
-        return identity_id
+    if not identity_id:
+        identity_id = uuid.uuid4().hex
+        with db() as conn:
+            conn.execute(
+                "INSERT INTO identities (id, free_exports_used, created_at) VALUES (?, 0, ?)",
+                (identity_id, int(time.time())),
+            )
+        set_identity_cookie(response, identity_id)
 
-    identity_id = uuid.uuid4().hex
-    with db() as conn:
-        conn.execute(
-            "INSERT INTO identities (id, free_exports_used, created_at) VALUES (?, 0, ?)",
-            (identity_id, int(time.time())),
-        )
-    set_identity_cookie(response, identity_id)
+    if posthog_client:
+        posthog_client.identify_context(identity_id)
+
     return identity_id
 
 
@@ -343,6 +428,15 @@ def create_checkout(identity_id: str = Depends(current_identity)):
             "metadata": {"duckit_identity_id": identity_id}
         },
     )
+    if posthog_client:
+        posthog_client.capture(
+            "checkout_started",
+            properties={"plan": "pro", "billing_interval": "monthly"},
+        )
+    posthog_log_logger.info(
+        "Subscription checkout session created",
+        extra={"plan": "pro", "billing_interval": "monthly"},
+    )
     return {"url": checkout.url}
 
 
@@ -356,6 +450,8 @@ def create_billing_portal(identity_id: str = Depends(current_identity)):
         customer=user["stripe_customer_id"],
         return_url=APP_BASE_URL,
     )
+    if posthog_client:
+        posthog_client.capture("billing_portal_opened")
     return {"url": portal.url}
 
 
@@ -396,6 +492,14 @@ async def duck_audio(
         if free_job:
             current_used = user["free_exports_used"] if user else 0
             if current_used >= MAX_FREE_EXPORTS:
+                if posthog_client:
+                    posthog_client.capture(
+                        "audio_ducking_upgrade_required",
+                        properties={
+                            "source_duration_seconds": round(longest_source),
+                            "reason": "max_free_exports_reached",
+                        },
+                    )
                 raise HTTPException(
                     status_code=402,
                     detail={
@@ -407,8 +511,15 @@ async def duck_audio(
         prepare_vad_audio(dialogue_path, vad_path)
         
         # Retrieve preloaded ONNX model from startup lifespan
-        model = ml_models["vad_model"]
-        get_speech_timestamps = ml_models["get_speech_timestamps"]
+        model = ml_models.get("vad_model")
+        get_speech_timestamps = ml_models.get("get_speech_timestamps")
+        
+        if not model or not get_speech_timestamps:
+            raise HTTPException(
+                status_code=503,
+                detail="VAD model is still loading or unavailable. Please try again shortly.",
+            )
+            
         model.reset_states()
 
         data, _ = sf.read(vad_path)
@@ -473,6 +584,24 @@ async def duck_audio(
                 ),
             )
 
+        if posthog_client:
+            posthog_client.capture(
+                "audio_ducking_completed",
+                properties={
+                    "source_duration_seconds": round(longest_source),
+                    "plan": "free" if free_job else "pro",
+                    "duck_volume": duck_vol,
+                },
+            )
+        posthog_log_logger.info(
+            "Audio ducking job completed",
+            extra={
+                "plan": "free" if free_job else "pro",
+                "source_duration_seconds": round(longest_source),
+                "duck_volume": duck_vol,
+            },
+        )
+
         updated_user = user_row(identity_id)
         exports_used = updated_user["free_exports_used"] if updated_user else 0
 
@@ -526,6 +655,12 @@ def download_job(
             },
         )
 
+    if posthog_client:
+        posthog_client.capture(
+            "audio_downloaded",
+            properties={"plan": "free" if job["is_free"] else "pro"},
+        )
+
     return FileResponse(
         job["output_path"],
         media_type="audio/mpeg",
@@ -563,6 +698,13 @@ def save_subscription(subscription, identity_hint=None):
                 """,
                 (subscription_id, status, customer_id, subscription_id),
             )
+            identity = conn.execute(
+                "SELECT id FROM identities WHERE stripe_customer_id = ? OR subscription_id = ?",
+                (customer_id, subscription_id),
+            ).fetchone()
+            identity_id = identity["id"] if identity else None
+
+    return identity_id
 
 
 @app.post("/api/stripe/webhook", include_in_schema=False)
@@ -593,6 +735,8 @@ async def stripe_webhook(request: Request):
     event_type = event["type"]
     obj = event["data"]["object"]
 
+    subscription_identity_id = None
+    subscription_status = None
     if event_type in {
         "checkout.session.completed",
         "checkout.session.async_payment_succeeded",
@@ -600,14 +744,28 @@ async def stripe_webhook(request: Request):
         subscription_id = obj.get("subscription")
         if subscription_id:
             subscription = stripe.Subscription.retrieve(subscription_id)
-            save_subscription(subscription, obj.get("client_reference_id"))
+            subscription_identity_id = save_subscription(
+                subscription, obj.get("client_reference_id")
+            )
+            subscription_status = subscription.get("status", "none")
 
     elif event_type in {
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
     }:
-        save_subscription(obj)
+        subscription_identity_id = save_subscription(obj)
+        subscription_status = obj.get("status", "none")
+
+    if posthog_client and subscription_identity_id:
+        posthog_client.capture(
+            "subscription_status_changed",
+            distinct_id=subscription_identity_id,
+            properties={
+                "subscription_status": subscription_status,
+                "source_event": event_type,
+            },
+        )
 
     with db() as conn:
         conn.execute(
