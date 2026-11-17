@@ -117,14 +117,10 @@ signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 # Global dictionary to hold warm models loaded at startup via FastAPI lifespan
 ml_models = {}
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Optimize CPU threading for small server instances
+def load_vad_model_safely():
     torch.set_num_threads(1)
-    
-    # Load Silero VAD once at server boot with onnx=True for 3x-5x faster CPU inference
-    logger.info("Loading Silero VAD model into RAM...")
     try:
+        logger.info("Loading Silero VAD model into RAM (ONNX mode)...")
         model, utils = torch.hub.load(
             repo_or_dir="snakers4/silero-vad",
             model="silero_vad",
@@ -133,9 +129,25 @@ async def lifespan(app: FastAPI):
         )
         ml_models["vad_model"] = model
         ml_models["get_speech_timestamps"] = utils[0]
-        logger.info("Silero VAD model loaded successfully.")
+        logger.info("Silero VAD model loaded successfully via ONNX.")
     except Exception:
-        logger.exception("Failed to load Silero VAD model during startup")
+        logger.exception("Failed ONNX load, falling back to standard JIT...")
+        try:
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                force_reload=False,
+                onnx=False,
+            )
+            ml_models["vad_model"] = model
+            ml_models["get_speech_timestamps"] = utils[0]
+            logger.info("Silero VAD fallback model loaded successfully.")
+        except Exception:
+            logger.exception("Critical error: Failed to load Silero VAD model entirely.")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    load_vad_model_safely()
     
     yield
     
@@ -510,14 +522,19 @@ async def duck_audio(
 
         prepare_vad_audio(dialogue_path, vad_path)
         
-        # Retrieve preloaded ONNX model from startup lifespan
+        # Retrieve preloaded model or attempt emergency on-the-fly load
         model = ml_models.get("vad_model")
         get_speech_timestamps = ml_models.get("get_speech_timestamps")
         
         if not model or not get_speech_timestamps:
+            load_vad_model_safely()
+            model = ml_models.get("vad_model")
+            get_speech_timestamps = ml_models.get("get_speech_timestamps")
+            
+        if not model or not get_speech_timestamps:
             raise HTTPException(
                 status_code=503,
-                detail="VAD model is still loading or unavailable. Please try again shortly.",
+                detail="VAD model failed to initialize. Please check server logs.",
             )
             
         model.reset_states()

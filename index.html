@@ -245,7 +245,7 @@
     <main class="relative mx-auto max-w-5xl px-5 pb-8 pt-12 sm:px-6 sm:pt-16">
         <section class="mx-auto max-w-2xl text-center">
             <p class="font-mono text-[11px] uppercase tracking-[0.22em] text-[#7dd3fc]">For YouTube, TikTok, and podcasts</p>
-            <h1 class="mt-3 text-[2.8rem] font-bold leading-[1.02] tracking-[-0.04em] text-white sm:text-6xl">Duck It</h1>
+            <h1 class="mt-3 text-[4.2rem] font-bold leading-[1.02] tracking-[-0.04em] text-white sm:text-8xl">Duck It</h1>
             <p class="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-slate-300 sm:text-lg">
                 Automatically lowers background music when people speak.
             </p>
@@ -806,34 +806,44 @@
             link.remove();
         }
 
-        async function refreshBilling() {
-            try {
-                const response = await fetch('/api/billing/status', {
-                    credentials: 'same-origin'
-                });
-                if (!response.ok) return;
+        async function refreshBilling(retries = 3) {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch('/api/billing/status', {
+                        credentials: 'same-origin'
+                    });
+                    if (!response.ok) continue;
 
-                billing = await response.json();
-                if (typeof billing.free_exports_used === 'number') {
-                    exportsUsed = billing.free_exports_used;
-                    localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
-                }
-                planBadge.hidden = false;
+                    billing = await response.json();
+                    if (typeof billing.free_exports_used === 'number') {
+                        exportsUsed = billing.free_exports_used;
+                        localStorage.setItem('duckit_free_exports_used', String(exportsUsed));
+                    }
+                    planBadge.hidden = false;
 
-                if (billing.pro) {
-                    planBadge.textContent = 'Pro · Unlimited';
-                    planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
-                    upgradeBtn.textContent = 'Manage plan';
-                    planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
-                } else {
-                    const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
-                    planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
-                    planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
-                    upgradeBtn.textContent = 'Upgrade to Pro';
-                    planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
+                    if (billing.pro) {
+                        planBadge.textContent = 'Pro · Unlimited';
+                        planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
+                        upgradeBtn.textContent = 'Manage plan';
+                        planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
+                        renderTrialMeter();
+                        return; // Successfully synced pro status
+                    } else {
+                        const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
+                        planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
+                        planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
+                        upgradeBtn.textContent = 'Upgrade to Pro';
+                        planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
+                    }
+                    renderTrialMeter();
+                    
+                    if (i < retries - 1) {
+                        await new Promise(r => setTimeout(r, 2000)); // Wait 2s for webhook to land if just returning from checkout
+                    }
+                } catch (_) {
+                    if (i < retries - 1) await new Promise(r => setTimeout(r, 2000));
                 }
-                renderTrialMeter();
-            } catch (_) {}
+            }
             renderTrialMeter();
         }
 
@@ -1054,7 +1064,7 @@
         if (checkoutState === 'success') {
             trackEvent('subscription_started');
             notify('Payment received. Activating Pro…');
-            setTimeout(refreshBilling, 1200);
+            refreshBilling(5); // Retry 5 times to wait for webhook sync
         } else {
             refreshBilling();
         }
