@@ -9,6 +9,7 @@ import uuid
 from contextlib import asynccontextmanager, contextmanager
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import ffmpeg
 import numpy as np
@@ -117,32 +118,100 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
 stripe.api_key = STRIPE_SECRET_KEY
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
-vad_model: torch.jit.ScriptModule | None = None
-vad_load_error: str | None = None
 # Silero VAD carries recurrent state between chunks. Serialising access prevents
 # concurrent jobs from contaminating each other's speech decisions.
 vad_lock = threading.Lock()
+# Guard the (potentially slow, network-backed) model download so concurrent jobs
+# cannot race each other through torch.hub.
+vad_load_lock = threading.Lock()
+
+# Models are intentionally kept process-global so every request reuses a single
+# warm instance instead of reloading weights per job.
+ml_models: dict[str, Any] = {}
+vad_model: Any = None
+vad_load_error: str | None = None
+
+
+def _store_vad_model(model: Any, utils: Any, backend: str) -> None:
+    global vad_model
+    ml_models["model"] = model
+    ml_models["utils"] = utils
+    ml_models["backend"] = backend
+    vad_model = model
 
 
 def load_vad_model_safely() -> bool:
-    """Load only the bundled TorchScript model; never use torch.hub/GitHub."""
+    """Load Silero VAD via torch.hub, preferring ONNX with a JIT fallback.
+
+    Order of preference:
+      1. ONNX runtime (fast + deterministic on CPU) via torch.hub.
+      2. Standard TorchScript (JIT) model via torch.hub.
+      3. A bundled local TorchScript file, for fully offline deployments.
+
+    Every stage is isolated so a failure in one path never prevents the next.
+    ``trust_repo=True`` suppresses torch.hub's interactive trust prompt, which
+    would otherwise raise ``EOFError`` inside a non-interactive web worker.
+    """
     global vad_model, vad_load_error
-    torch.set_num_threads(1)
-    try:
-        if not MODEL_PATH.is_file():
-            raise FileNotFoundError(f"Local VAD model file not found at {MODEL_PATH}")
-        logger.info("Loading local Silero VAD model from %s", MODEL_PATH)
-        model = torch.jit.load(str(MODEL_PATH), map_location="cpu")
-        model.eval()
-        vad_model = model
-        vad_load_error = None
-        logger.info("Local Silero VAD model loaded successfully")
+    if vad_model is not None:
         return True
-    except Exception as exc:
-        vad_model = None
-        vad_load_error = str(exc)
-        logger.exception("Failed to load the local Silero VAD model")
-        return False
+    with vad_load_lock:
+        # Another request may have loaded the model while we waited on the lock.
+        if vad_model is not None:
+            return True
+        torch.set_num_threads(1)
+
+        # Preferred path: ONNX runtime through torch.hub.
+        try:
+            logger.info("Loading Silero VAD (ONNX) via torch.hub ...")
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                onnx=True,
+                trust_repo=True,
+                force_reload=False,
+            )
+            _store_vad_model(model, utils, "onnx")
+            vad_load_error = None
+            logger.info("Silero VAD ONNX model loaded successfully")
+            return True
+        except Exception as exc:
+            logger.warning("ONNX Silero VAD load failed; falling back to JIT: %s", exc)
+
+        # Fallback path: the standard TorchScript model through torch.hub.
+        try:
+            logger.info("Loading Silero VAD (JIT) via torch.hub ...")
+            model, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-vad",
+                model="silero_vad",
+                onnx=False,
+                trust_repo=True,
+                force_reload=False,
+            )
+            _store_vad_model(model, utils, "jit")
+            vad_load_error = None
+            logger.info("Silero VAD JIT model loaded successfully")
+            return True
+        except Exception as exc:
+            logger.warning("torch.hub Silero VAD load failed; trying bundled model: %s", exc)
+
+        # Last resort: the bundled TorchScript file (requires no network access).
+        try:
+            if not MODEL_PATH.is_file():
+                raise FileNotFoundError(f"Local VAD model file not found at {MODEL_PATH}")
+            logger.info("Loading bundled Silero VAD model from %s", MODEL_PATH)
+            model = torch.jit.load(str(MODEL_PATH), map_location="cpu")
+            model.eval()
+            _store_vad_model(model, None, "local")
+            vad_load_error = None
+            logger.info("Bundled Silero VAD model loaded successfully")
+            return True
+        except Exception as exc:
+            vad_model = None
+            ml_models.clear()
+            vad_load_error = str(exc)
+            logger.exception("Failed to load the Silero VAD model from any source")
+            return False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -299,6 +368,29 @@ def entitlement_payload(identity_id: str):
         "exports_remaining": max(0, MAX_FREE_EXPORTS - used),
         "subscription_status": user["subscription_status"] if user else "none",
     }
+
+
+def feature_flags_for(identity_id: str) -> dict[str, Any]:
+    """Evaluate every PostHog feature flag for an identity.
+
+    Returns an empty mapping whenever PostHog is unavailable or the request
+    fails, so callers can always fall back to their defaults without branching
+    on configuration or network state.
+    """
+    if not posthog_client:
+        return {}
+    try:
+        flags = posthog_client.get_all_flags(identity_id)
+        return flags if isinstance(flags, dict) else {}
+    except Exception:
+        logger.exception("Could not evaluate PostHog feature flags for %s", identity_id)
+        return {}
+
+
+def experiment_value(identity_id: str, key: str, default: Any) -> Any:
+    """Return a single feature-flag value, falling back to ``default``."""
+    value = feature_flags_for(identity_id).get(key)
+    return default if value is None else value
 
 
 def require_billing_config(require_price: bool = False) -> None:
@@ -541,7 +633,7 @@ def render_ducked_music(music_path: Path, vad_regions: list[tuple[int, int]], ou
         pcm_path.unlink(missing_ok=True)
 
 
-def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, free_job: bool):
+def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, max_seconds: float | None = None):
     """Run the final FFmpeg encode off the event loop."""
     mixed = ffmpeg.filter(
         [ffmpeg.input(str(ducked_music_path)), ffmpeg.input(str(dialogue_path))],
@@ -552,8 +644,8 @@ def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, f
         normalize=0,
     )
     output_kwargs = {"acodec": "libmp3lame", "audio_bitrate": "320k"}
-    if free_job:
-        output_kwargs["t"] = 180
+    if max_seconds is not None:
+        output_kwargs["t"] = max_seconds
     run_ffmpeg(ffmpeg.output(mixed, str(output_path), **output_kwargs), "mixing and encoding output")
 
 
@@ -580,6 +672,31 @@ def health_check():
 @app.get("/api/billing/status")
 def billing_status(identity_id: str = Depends(current_identity)):
     return entitlement_payload(identity_id)
+
+
+@app.get("/api/experiments")
+def experiments(identity_id: str = Depends(current_identity)):
+    """Return PostHog feature-flag variants for the connected identity.
+
+    Evaluated server-side against the signed cookie identity so a single
+    assignment can drive both UI copy and privileged logic (for example the
+    free-export limit) for the same user.
+    """
+    return {"flags": feature_flags_for(identity_id), "identity_id": identity_id}
+
+
+@app.get("/api/config")
+def public_config():
+    """Public bootstrap values for the frontend.
+
+    The PostHog project token is a publishable key by design (it is embedded in
+    client-side JavaScript), so it is safe to expose. No secrets (Stripe keys,
+    session secret, webhook secret) are ever returned here.
+    """
+    return {
+        "posthog_project_token": settings.posthog_project_token or "",
+        "posthog_host": settings.posthog_host or "",
+    }
 
 
 @app.post("/api/billing/verify")
@@ -715,23 +832,57 @@ async def duck_audio(
         if longest_source > MAX_SOURCE_SECONDS:
             raise HTTPException(status_code=413, detail="Source tracks must be one hour or shorter.")
 
+        free_export_limit = MAX_FREE_EXPORTS
+        free_clip_seconds = 180.0
         if free_job:
+            # Trial limits can be A/B tested via PostHog feature flags; the
+            # constants above remain the authoritative defaults. Evaluate off the
+            # event loop because the PostHog client performs blocking I/O.
+            flags = await run_in_threadpool(feature_flags_for, identity_id)
+            # Multivariate flags arrive as strings, so coerce defensively and
+            # ignore booleans (a malformed flag must never become a limit of 1).
+            raw_export_limit = flags.get("free_export_limit", MAX_FREE_EXPORTS)
+            if isinstance(raw_export_limit, bool) or raw_export_limit is None:
+                raw_export_limit = MAX_FREE_EXPORTS
+            try:
+                free_export_limit = max(0, int(raw_export_limit))
+            except (TypeError, ValueError):
+                free_export_limit = MAX_FREE_EXPORTS
+            raw_clip_seconds = flags.get("free_clip_seconds", 180.0)
+            if isinstance(raw_clip_seconds, bool) or raw_clip_seconds is None:
+                raw_clip_seconds = 180.0
+            try:
+                free_clip_seconds = float(raw_clip_seconds)
+            except (TypeError, ValueError):
+                free_clip_seconds = 180.0
+            if free_clip_seconds <= 0:
+                # A non-positive cap would silently produce an empty export.
+                free_clip_seconds = 180.0
             current_used = user["free_exports_used"] if user else 0
-            if current_used >= MAX_FREE_EXPORTS:
+            if current_used >= free_export_limit:
                 raise HTTPException(
                     status_code=402,
                     detail={
                         "code": "upgrade_required",
-                        "message": "You have used your 3 free exports. Upgrade to Pro for unlimited exports.",
+                        "message": (
+                            f"You have used your {free_export_limit} free exports. "
+                            "Upgrade to Pro for unlimited exports."
+                        ),
                     },
                 )
 
+        # If startup initialisation was skipped or failed, attempt an emergency,
+        # on-the-fly model load before giving up on this request.
         if vad_model is None:
-            raise HTTPException(status_code=503, detail="The VAD engine is unavailable. Please try again shortly.")
+            if not await run_in_threadpool(load_vad_model_safely):
+                raise HTTPException(
+                    status_code=503,
+                    detail="The VAD engine is unavailable. Please try again shortly.",
+                )
 
         # Free exports are always capped server-side; the browser's trim choice is
         # a convenience, never the enforcement mechanism.
-        processing_duration = min(longest_source, 180.0) if free_job else None
+        processing_duration = min(longest_source, free_clip_seconds) if free_job else None
         await run_in_threadpool(prepare_vad_audio, dialogue_path, vad_path, processing_duration)
         try:
             speech_regions = await run_in_threadpool(detect_speech_samples, vad_path)
@@ -745,7 +896,13 @@ async def duck_audio(
             logger.exception("Audio job %s failed while analysing or ducking", run_id)
             raise AudioPipelineError("applying ducking curve", "Audio analysis failed.") from exc
 
-        await run_in_threadpool(mix_audio, dialogue_path, ducked_music_path, output_path, free_job)
+        await run_in_threadpool(
+            mix_audio,
+            dialogue_path,
+            ducked_music_path,
+            output_path,
+            free_clip_seconds if free_job else None,
+        )
 
         if not output_path.is_file() or output_path.stat().st_size == 0:
             raise AudioPipelineError("encoding output", "The encoder did not create an audio file.")
@@ -776,7 +933,7 @@ async def duck_audio(
             "job_id": job_id,
             "filename": filename,
             "download_url": f"/api/jobs/{job_id}/download",
-            "exports_remaining": max(0, MAX_FREE_EXPORTS - exports_used),
+            "exports_remaining": max(0, free_export_limit - exports_used),
             "free_exports_used": exports_used,
         }
 

@@ -27,10 +27,9 @@
             },
         };
     </script>
-    <!-- PostHog Analytics Script -->
+    <!-- PostHog Analytics (initialised from /api/config at runtime) -->
     <script>
-        !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.f=function(t,e){u[e]=function(){u.push([e].concat(Array.prototype.slice.call(arguments,0)))}};,p="https://app.posthog.com",u.init(i,s,a)}(window,window.posthog||[]);
-        posthog.init('YOUR_POSTHOG_API_KEY', { api_host: 'https://app.posthog.com' })
+        !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture identify alias people.set people.set_once set_config register register_once unregister opt_out_capturing has_opted_out_capturing opt_in_capturing reset isFeatureEnabled onFeatureFlags getFeatureFlag getFeatureFlagPayload reloadFeatureFlags group".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
     </script>
     <style>
         :root { color-scheme: dark; }
@@ -199,6 +198,44 @@
             box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.28), 0 10px 40px -12px rgba(56, 189, 248, 0.85);
         }
         audio { width: 100%; height: 36px; }
+
+        /* Pro checkout success celebration */
+        #successModal.fade-out { opacity: 0; transition: opacity 460ms ease; }
+        .success-panel { animation: success-pop 520ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+        @keyframes success-pop {
+            from { opacity: 0; transform: translateY(16px) scale(0.93); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .success-glow {
+            border-radius: 9999px;
+            background: radial-gradient(circle, rgba(56, 189, 248, 0.55), rgba(99, 102, 241, 0.18) 58%, transparent 72%);
+            filter: blur(12px);
+            animation: success-pulse 1.8s ease-in-out infinite;
+        }
+        @keyframes success-pulse {
+            0%, 100% { transform: scale(0.9); opacity: 0.65; }
+            50% { transform: scale(1.16); opacity: 1; }
+        }
+        .success-circle {
+            stroke: url(#successGrad);
+            stroke-width: 2.5;
+            fill: rgba(56, 189, 248, 0.08);
+            stroke-dasharray: 151;
+            stroke-dashoffset: 151;
+            animation: draw-circle 700ms ease-out forwards;
+        }
+        .success-tick {
+            stroke: #bae6fd;
+            stroke-width: 3.6;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            stroke-dasharray: 30;
+            stroke-dashoffset: 30;
+            animation: draw-tick 480ms ease-out 560ms forwards;
+        }
+        @keyframes draw-circle { to { stroke-dashoffset: 0; } }
+        @keyframes draw-tick { to { stroke-dashoffset: 0; } }
+
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation: none !important;
@@ -245,8 +282,8 @@
     <main class="relative mx-auto max-w-5xl px-5 pb-8 pt-12 sm:px-6 sm:pt-16">
         <section class="mx-auto max-w-2xl text-center">
             <p class="font-mono text-[11px] uppercase tracking-[0.22em] text-[#7dd3fc]">For YouTube, TikTok, and podcasts</p>
-            <h1 class="mt-3 text-[4.2rem] font-bold leading-[1.02] tracking-[-0.04em] text-white sm:text-8xl">Duck It</h1>
-            <p class="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-slate-300 sm:text-lg">
+            <h1 id="heroHeadline" class="mt-3 text-[4.2rem] font-bold leading-[1.02] tracking-[-0.04em] text-white sm:text-8xl">Duck It</h1>
+            <p id="heroSubhead" class="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-slate-300 sm:text-lg">
                 Automatically lowers background music when people speak.
             </p>
             <div class="mt-5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.16em] text-slate-500">
@@ -422,8 +459,8 @@
                 </button>
             </div>
             <h3 id="modalTitle" class="mt-4 text-lg font-semibold text-white">Your file is longer than the Free plan allows.</h3>
-            <p class="mt-2 text-sm leading-relaxed text-slate-300">
-                Download the first 3 minutes for free, or upgrade to process the entire file.
+            <p id="modalSubhead" class="mt-2 text-sm leading-relaxed text-slate-300">
+                Download the first 3 mins for free, or upgrade to process the entire file.
             </p>
             <div class="mt-6 flex flex-col gap-2.5 sm:flex-row">
                 <button type="button" id="modalTrimBtn" class="flex-1 rounded-xl border border-white/15 bg-white/[0.05] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-white/10">
@@ -433,6 +470,30 @@
                     Upgrade to Pro
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- Pro Checkout Success Modal -->
+    <div id="successModal" hidden class="fixed inset-0 z-[60] flex items-center justify-center bg-black/80 p-4 backdrop-blur-md" role="dialog" aria-modal="true" aria-labelledby="successTitle">
+        <div class="success-panel panel relative w-full max-w-sm rounded-3xl border border-white/15 p-8 text-center shadow-2xl">
+            <div class="relative mx-auto grid h-24 w-24 place-items-center">
+                <span class="success-glow absolute inset-0" aria-hidden="true"></span>
+                <svg class="relative h-24 w-24" viewBox="0 0 52 52" fill="none" aria-hidden="true">
+                    <defs>
+                        <linearGradient id="successGrad" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0%" stop-color="#38bdf8"/>
+                            <stop offset="100%" stop-color="#6366f1"/>
+                        </linearGradient>
+                    </defs>
+                    <circle class="success-circle" cx="26" cy="26" r="24"/>
+                    <path class="success-tick" d="M15 27l7 7 15-16"/>
+                </svg>
+            </div>
+            <h3 id="successTitle" class="mt-5 text-2xl font-bold tracking-tight text-white">Welcome to Pro</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">Your subscription is active. Unlimited exports and full-length tracks are unlocked.</p>
+            <button id="successContinue" type="button" class="mt-6 w-full rounded-xl bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-4 py-3 text-sm font-semibold text-white shadow-[0_10px_40px_-12px_rgba(56,189,248,0.9)] transition hover:brightness-110">
+                Start creating
+            </button>
         </div>
     </div>
 
@@ -478,9 +539,19 @@
         const modalCloseBtn = document.getElementById('modalCloseBtn');
         const modalTrimBtn = document.getElementById('modalTrimBtn');
         const modalUpgradeBtn = document.getElementById('modalUpgradeBtn');
+        const modalSubhead = document.getElementById('modalSubhead');
+        const heroHeadline = document.getElementById('heroHeadline');
+        const heroSubhead = document.getElementById('heroSubhead');
+        const btnLabel = document.getElementById('btnLabel');
+        const successModal = document.getElementById('successModal');
+        const successContinue = document.getElementById('successContinue');
 
-        const MAX_FREE_EXPORTS = 3;
-        const FREE_CLIP_LIMIT_SEC = 180;
+        // Defaults mirror the server; PostHog feature flags can override these so
+        // trial limits and pricing copy can be A/B tested without a redeploy.
+        let maxFreeExports = 3;
+        let freeClipLimitSec = 180;
+        let freePlanCopy = null;
+        let proPlanCopy = null;
         let exportsUsed = Number(localStorage.getItem('duckit_free_exports_used')) || 0;
         let billing = { pro: false };
         let downloadUrl = null;
@@ -569,8 +640,9 @@
                 return;
             }
             trialMeter.hidden = false;
-            const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
-            const pct = Math.max(0, Math.min(100, Math.round((remaining / MAX_FREE_EXPORTS) * 100)));
+            const capacity = maxFreeExports > 0 ? maxFreeExports : 1;
+            const remaining = Math.max(0, maxFreeExports - exportsUsed);
+            const pct = Math.max(0, Math.min(100, Math.round((remaining / capacity) * 100)));
             trialText.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
             trialBar.style.width = pct + '%';
 
@@ -815,16 +887,16 @@
             }
             planBadge.hidden = false;
             if (billing.pro) {
-                planBadge.textContent = 'Pro · Unlimited';
+                planBadge.textContent = 'Pro Unlimited';
                 planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
                 upgradeBtn.textContent = 'Manage plan';
-                planNote.textContent = 'Pro is active — unlimited exports and full-length tracks.';
+                planNote.textContent = proPlanCopy || 'Pro is active — unlimited exports and full-length tracks.';
             } else {
-                const remaining = Math.max(0, MAX_FREE_EXPORTS - exportsUsed);
+                const remaining = Math.max(0, maxFreeExports - exportsUsed);
                 planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
                 planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
                 upgradeBtn.textContent = 'Upgrade to Pro';
-                planNote.textContent = '3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.';
+                planNote.textContent = freePlanCopy || defaultFreePlanCopy();
             }
             renderTrialMeter();
         }
@@ -843,10 +915,52 @@
             }
         }
 
-        async function verifyCheckoutReturn(sessionId) {
+        function sleep(ms) {
+            return new Promise((resolve) => setTimeout(resolve, ms));
+        }
+
+        function cleanCheckoutParams() {
+            // Remove the one-time Checkout ID so refresh/back cannot re-submit it.
+            const url = new URL(window.location.href);
+            url.searchParams.delete('checkout');
+            url.searchParams.delete('session_id');
+            window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+        }
+
+        function showSuccessModal() {
+            if (!successModal) return;
+            successModal.classList.remove('fade-out');
+            successModal.hidden = false;
+            if (successContinue) successContinue.focus();
+            const panel = successModal.querySelector('.success-panel');
+            if (panel) {
+                // Restart the pop animation each time the modal is shown.
+                panel.style.animation = 'none';
+                void panel.offsetWidth;
+                panel.style.animation = '';
+            }
+        }
+
+        function hideSuccessModal() {
+            if (!successModal || successModal.hidden) return;
+            successModal.classList.add('fade-out');
+            setTimeout(() => {
+                successModal.hidden = true;
+                successModal.classList.remove('fade-out');
+            }, 460);
+        }
+
+        function finalizeProUpgrade() {
+            trackEvent('subscription_activated', { pro: true });
+            renderBilling();
+            cleanCheckoutParams();
+            // The success modal stays open so its animation can finish; the user
+            // dismisses it with the "Start creating" button.
+            notify('Welcome to Pro — unlimited exports and full-length tracks are unlocked.');
+        }
+
+        async function verifyCheckoutSession(sessionId) {
             const payload = new URLSearchParams({ session_id: sessionId });
-            upgradeBtn.disabled = true;
-            upgradeBtn.textContent = 'Activating…';
             try {
                 const response = await fetch('/api/billing/verify', {
                     method: 'POST',
@@ -854,24 +968,142 @@
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: payload.toString(),
                 });
-                let data = {};
-                try { data = await response.json(); } catch (_) {}
-                if (!response.ok) throw new Error(formatDetail(data.detail));
+                if (!response.ok) return null;
+                const data = await response.json();
                 billing = data;
                 renderBilling();
-                notify(billing.pro ? 'Pro is active. Thanks for subscribing!' : 'Payment is complete; subscription activation is still pending.');
-            } catch (error) {
-                // End the UI loading state even when Stripe is temporarily unavailable.
-                notify(error.message || 'We could not verify the payment yet. Please refresh shortly.');
-                await refreshBilling();
-            } finally {
-                upgradeBtn.disabled = false;
-                // Remove the one-time Checkout ID so refresh/back cannot re-submit it.
-                const url = new URL(window.location.href);
-                url.searchParams.delete('checkout');
-                url.searchParams.delete('session_id');
-                window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+                return data;
+            } catch (_) {
+                return null;
             }
+        }
+
+        async function handleCheckoutSuccess(sessionId) {
+            trackEvent('subscription_started');
+            showSuccessModal();
+
+            // The Stripe webhook is the source of truth; it writes Pro entitlement
+            // to SQLite. Poll the status endpoint until the write lands.
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+                const status = await refreshBilling();
+                if (status && status.pro) {
+                    finalizeProUpgrade();
+                    return;
+                }
+                await sleep(2000);
+            }
+
+            // Final fallback: reconcile synchronously against Stripe in case the
+            // webhook is delayed or misconfigured.
+            if (sessionId) {
+                const verified = await verifyCheckoutSession(sessionId);
+                if (verified && verified.pro) {
+                    finalizeProUpgrade();
+                    return;
+                }
+            }
+
+            hideSuccessModal();
+            cleanCheckoutParams();
+            notify('Payment received, but activation is still pending. We will finish setting up Pro shortly — please refresh in a moment.');
+        }
+
+        function numericFlag(value) {
+            if (typeof value === 'number' && Number.isFinite(value)) return value;
+            if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+                return Number(value);
+            }
+            return null;
+        }
+
+        function minutesLabel(seconds) {
+            const mins = Math.max(1, Math.round(seconds / 60));
+            return mins + (mins === 1 ? ' min' : ' mins');
+        }
+
+        function defaultFreePlanCopy() {
+            return maxFreeExports + ' free exports (up to ' + minutesLabel(freeClipLimitSec)
+                + ' max per export). Upgrade to Pro for unlimited length & exports.';
+        }
+
+        function renderLimitCopy() {
+            if (modalSubhead) {
+                modalSubhead.textContent = 'Download the first ' + minutesLabel(freeClipLimitSec)
+                    + ' for free, or upgrade to process the entire file.';
+            }
+            if (modalTrimBtn) {
+                modalTrimBtn.textContent = 'Download ' + minutesLabel(freeClipLimitSec) + ' Version';
+            }
+        }
+
+        function applyExperimentFlags(flags) {
+            if (!flags || typeof flags !== 'object') return;
+            if (typeof flags.hero_headline === 'string' && flags.hero_headline.trim() && heroHeadline) {
+                heroHeadline.textContent = flags.hero_headline;
+            }
+            if (typeof flags.hero_subhead === 'string' && flags.hero_subhead.trim() && heroSubhead) {
+                heroSubhead.textContent = flags.hero_subhead;
+            }
+            if (typeof flags.cta_text === 'string' && flags.cta_text.trim() && btnLabel) {
+                btnLabel.textContent = flags.cta_text;
+            }
+            if (typeof flags.free_plan_copy === 'string' && flags.free_plan_copy.trim()) {
+                freePlanCopy = flags.free_plan_copy;
+            }
+            if (typeof flags.pro_plan_copy === 'string' && flags.pro_plan_copy.trim()) {
+                proPlanCopy = flags.pro_plan_copy;
+            }
+            const exportLimit = numericFlag(flags.free_export_limit);
+            if (exportLimit !== null && exportLimit > 0) {
+                maxFreeExports = Math.floor(exportLimit);
+            }
+            const clipSeconds = numericFlag(flags.free_clip_seconds);
+            if (clipSeconds !== null && clipSeconds > 0) {
+                freeClipLimitSec = clipSeconds;
+            }
+            renderLimitCopy();
+            renderBilling();
+        }
+
+        async function bootstrapPostHog() {
+            try {
+                const response = await fetch('/api/config', { credentials: 'same-origin' });
+                if (!response.ok) return;
+                const config = await response.json();
+                const token = config.posthog_project_token;
+                const host = config.posthog_host || 'https://us.i.posthog.com';
+                if (token && token !== 'YOUR_POSTHOG_API_KEY' && window.posthog && typeof window.posthog.init === 'function') {
+                    window.posthog.init(token, {
+                        api_host: host,
+                        capture_pageview: true,
+                        capture_pageleave: true,
+                        person_profiles: 'identified_only',
+                    });
+                }
+            } catch (_) {
+                // Analytics is optional; never block the editor on bootstrap.
+            }
+        }
+
+        async function bootstrapExperiments() {
+            let identity = null;
+            try {
+                const response = await fetch('/api/experiments', { credentials: 'same-origin' });
+                if (response.ok) {
+                    const data = await response.json();
+                    identity = data.identity_id || null;
+                    applyExperimentFlags(data.flags);
+                }
+            } catch (_) {
+                // Fall back to the defaults baked into the page.
+            }
+            if (identity && window.posthog && typeof window.posthog.identify === 'function') {
+                window.posthog.identify(identity);
+            }
+            if (window.posthog && typeof window.posthog.onFeatureFlags === 'function') {
+                window.posthog.onFeatureFlags((flags) => applyExperimentFlags(flags));
+            }
+            renderLimitCopy();
         }
 
         async function goToBilling() {
@@ -963,7 +1195,7 @@
             formData.append('music', music);
             formData.append('duck_vol', (Number(duckVol.value) / 100).toFixed(2));
             if (trimToFreeLimit) {
-                formData.append('trim_seconds', '180');
+                formData.append('trim_seconds', String(Math.round(freeClipLimitSec)));
             }
 
             try {
@@ -1067,14 +1299,14 @@
             }
 
             if (!billing.pro) {
-                if (exportsUsed >= MAX_FREE_EXPORTS) {
+                if (exportsUsed >= maxFreeExports) {
                     trackEvent('limit_hit', { reason: 'max_free_exports_reached' });
-                    notify('You have used all 3 free exports. Upgrade to Pro.');
+                    notify('You have used all ' + maxFreeExports + ' free exports. Upgrade to Pro.');
                     return;
                 }
                 const dDur = (await durationOf(dialogue)) || 0;
                 const mDur = (await durationOf(music)) || 0;
-                if (Math.max(dDur, mDur) > FREE_CLIP_LIMIT_SEC) {
+                if (Math.max(dDur, mDur) > freeClipLimitSec) {
                     openLengthModal(dialogue, music);
                     return;
                 }
@@ -1087,20 +1319,32 @@
         refreshHeader();
         upgradeBtn.addEventListener('click', goToBilling);
 
+        if (successContinue) {
+            successContinue.addEventListener('click', () => hideSuccessModal());
+        }
+
         const checkoutParams = new URLSearchParams(window.location.search);
         const checkoutState = checkoutParams.get('checkout');
         const checkoutSessionId = checkoutParams.get('session_id');
         if (checkoutState === 'success' && checkoutSessionId) {
-            trackEvent('subscription_started');
-            notify('Payment received. Activating Pro…');
-            verifyCheckoutReturn(checkoutSessionId);
+            handleCheckoutSuccess(checkoutSessionId);
         } else if (checkoutState === 'success') {
             // A malformed return must not leave a persistent loading message.
             notify('Payment return was missing its verification ID. Please contact support if you were charged.');
+            cleanCheckoutParams();
+            refreshBilling();
+        } else if (checkoutState === 'cancelled') {
+            notify('Checkout was cancelled. You were not charged.');
+            cleanCheckoutParams();
             refreshBilling();
         } else {
             refreshBilling();
         }
+
+        (async function initExperiments() {
+            await bootstrapPostHog();
+            await bootstrapExperiments();
+        })();
     </script>
 </body>
 </html>
