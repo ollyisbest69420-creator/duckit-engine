@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#090d16">
+    <meta name="robots" content="index, follow">
+    <title>Refund Policy — {{COMPANY_NAME}}</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        html { background: #090d16; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+            color: #e2e8f0;
+            line-height: 1.7;
+            background-image:
+                radial-gradient(ellipse 70% 45% at 50% -12%, rgba(56, 189, 248, 0.14), transparent 55%),
+                radial-gradient(ellipse 36% 32% at 100% 0%, rgba(99, 102, 241, 0.12), transparent 46%);
+        }
+        a { color: #7dd3fc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        header.bar, main, footer.bar { margin: 0 auto; max-width: 46rem; padding: 0 1.25rem; }
+        header.bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding-top: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .brand { display: flex; align-items: center; gap: 0.6rem; color: #f8fafc; font-weight: 600; }
+        .brand span.mark {
+            display: grid;
+            place-items: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            background: linear-gradient(135deg, #38bdf8, #6366f1);
+        }
+        .brand svg { width: 1rem; height: 1rem; }
+        main { padding-top: 2.5rem; padding-bottom: 3rem; }
+        h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 0.4rem; letter-spacing: -0.02em; color: #fff; }
+        .updated { margin: 0 0 2rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.12em; color: #64748b; }
+        h2 { margin: 2rem 0 0.5rem; font-size: 1.05rem; color: #f1f5f9; }
+        p, li { color: #cbd5e1; font-size: 0.95rem; }
+        ul, ol { padding-left: 1.15rem; }
+        li { margin: 0.3rem 0; }
+        .callout {
+            margin: 1.5rem 0;
+            padding: 1rem 1.15rem;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            border-radius: 0.85rem;
+            background: rgba(56, 189, 248, 0.07);
+            font-size: 0.92rem;
+            color: #e0f2fe;
+        }
+        footer.bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.25rem;
+            justify-content: space-between;
+            padding-top: 1.5rem;
+            padding-bottom: 2.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
+            font-size: 0.78rem;
+            color: #64748b;
+        }
+        footer.bar nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    </style>
+</head>
+<body>
+    <header class="bar">
+        <a class="brand" href="/">
+            <span class="mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12h2.2l1.6-4.2L10 17l2.6-8.2L14.6 14H21"/>
+                </svg>
+            </span>
+            {{COMPANY_NAME}}
+
+    <main>
+        <h1>Refund Policy</h1>
+        <p class="updated">Last updated {{YEAR}}</p>
+
+        <p>
+            Pro costs {{PRO_PRICE}} and is billed through Stripe. This policy explains when we refund a payment and
+            how to ask for one. It sits alongside your statutory rights, which it never reduces.
+        </p>
+
+        <h2>1. Free plan first</h2>
+        <p>
+            The free plan includes three full exports and every feature of the engine, apart from the length cap.
+            Please try it before subscribing: the demo clips and a three-minute export are enough to judge whether
+            the ducking suits your material.
+        </p>
+
+        <h2>2. Cancelling</h2>
+        <ul>
+            <li>Open the billing portal from the app and cancel at any time.</li>
+            <li>Cancellation stops the next renewal; Pro stays active until the end of the period you already paid for.</li>
+            <li>We do not pro-rate the remainder of a billing period, but no further charges are taken.</li>
+            <li>If a renewal was charged after you cancelled, contact us and we will refund it in full.</li>
+        </ul>
+
+        <h2>3. When we refund</h2>
+        <ul>
+            <li><strong>Duplicate or accidental charges</strong> — always refunded in full.</li>
+            <li><strong>First subscription within 14 days</strong> — refunded if you have not exported a full-length file with Pro.</li>
+            <li><strong>Service unavailable</strong> — if the engine cannot process your files for a sustained period, we refund the affected period.</li>
+            <li><strong>Technical failure on our side</strong> — refunded when we cannot produce a working export and cannot fix it for you.</li>
+        </ul>
+
+        <h2>4. When we cannot refund</h2>
+        <ul>
+            <li>Months already used to export full-length files.</li>
+            <li>Requests made more than 60 days after the charge, unless local law requires otherwise.</li>
+            <li>Dissatisfaction with a creative result that matches the settings you chose — the engine is a mixing aid, not a guarantee of taste.</li>
+        </ul>
+
+        <div class="callout">
+            Consumers in the UK and EU normally have 14 days to withdraw from a digital subscription. Because Pro
+            unlocks content immediately, that right ends once you export a full-length file, but nothing here
+            removes any other statutory right you may have.
+        </div>
+
+        <h2>5. How to request a refund</h2>
+        <ol>
+            <li>Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> from the address on the Stripe receipt.</li>
+            <li>Include the date of the charge and the last four digits of the card, or the invoice number.</li>
+            <li>Tell us briefly what went wrong so we can fix the underlying issue.</li>
+        </ol>
+        <p>
+            We reply within two business days. Approved refunds are returned to the original payment method, usually
+            within five to ten business days depending on your bank.
+        </p>
+
+        <h2>6. Chargebacks</h2>
+        <p>
+            Please contact us before opening a chargeback: it is almost always faster. A chargeback freezes the
+            subscription while the card network investigates.
+        </p>
+
+        <h2>7. Contact</h2>
+        <p>
+            Questions about this policy go to <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>. It is
+            governed by the laws of {{JURISDICTION}}.
+        </p>
+    </main>
+
+    <footer class="bar">
+        <p>© {{YEAR}} {{COMPANY_NAME}}</p>
+        <nav>
+            <a href="/terms">Terms</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/refunds">Refunds</a>
+        </nav>
+    </footer>
+</body>
+</html>
+
+        </a>
+        <a href="/">Back to the editor</a>
+    </header>

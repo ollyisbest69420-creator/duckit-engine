@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#090d16">
+    <meta name="robots" content="index, follow">
+    <title>Privacy Policy — {{COMPANY_NAME}}</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        html { background: #090d16; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+            color: #e2e8f0;
+            line-height: 1.7;
+            background-image:
+                radial-gradient(ellipse 70% 45% at 50% -12%, rgba(56, 189, 248, 0.14), transparent 55%),
+                radial-gradient(ellipse 36% 32% at 100% 0%, rgba(99, 102, 241, 0.12), transparent 46%);
+        }
+        a { color: #7dd3fc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        header.bar, main, footer.bar { margin: 0 auto; max-width: 46rem; padding: 0 1.25rem; }
+        header.bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding-top: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .brand { display: flex; align-items: center; gap: 0.6rem; color: #f8fafc; font-weight: 600; }
+        .brand span.mark {
+            display: grid;
+            place-items: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            background: linear-gradient(135deg, #38bdf8, #6366f1);
+        }
+        .brand svg { width: 1rem; height: 1rem; }
+        main { padding-top: 2.5rem; padding-bottom: 3rem; }
+        h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 0.4rem; letter-spacing: -0.02em; color: #fff; }
+        .updated { margin: 0 0 2rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.12em; color: #64748b; }
+        h2 { margin: 2rem 0 0.5rem; font-size: 1.05rem; color: #f1f5f9; }
+        p, li, td, th { color: #cbd5e1; font-size: 0.95rem; }
+        ul { padding-left: 1.15rem; }
+        li { margin: 0.3rem 0; }
+        table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: 0.9rem; }
+        th, td { text-align: left; padding: 0.55rem 0.6rem; border-bottom: 1px solid rgba(255, 255, 255, 0.08); vertical-align: top; }
+        th { color: #f8fafc; font-weight: 600; }
+        .callout {
+            margin: 1.5rem 0;
+            padding: 1rem 1.15rem;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            border-radius: 0.85rem;
+            background: rgba(56, 189, 248, 0.07);
+            font-size: 0.92rem;
+            color: #e0f2fe;
+        }
+        footer.bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.25rem;
+            justify-content: space-between;
+            padding-top: 1.5rem;
+            padding-bottom: 2.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
+            font-size: 0.78rem;
+            color: #64748b;
+        }
+        footer.bar nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    </style>
+</head>
+<body>
+    <header class="bar">
+        <a class="brand" href="/">
+            <span class="mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12h2.2l1.6-4.2L10 17l2.6-8.2L14.6 14H21"/>
+                </svg>
+            </span>
+            {{COMPANY_NAME}}
+        </a>
+        <a href="/">Back to the editor</a>
+    </header>
+
+
+    <main>
+        <h1>Privacy Policy</h1>
+        <p class="updated">Last updated {{YEAR}}</p>
+
+        <p>
+            {{COMPANY_NAME}} processes audio you upload so it can return a mixed export. This page explains what we
+            store, why we store it, and how long it stays. It applies to the editor, the demo clips, and the billing
+            flows on this domain.
+        </p>
+
+        <h2>1. What we process</h2>
+        <table>
+            <tr>
+                <th>Data</th>
+                <th>Why</th>
+                <th>Retention</th>
+            </tr>
+            <tr>
+                <td>Uploaded dialogue and music files</td>
+                <td>To detect speech and render your export</td>
+                <td>Working copies removed when the job finishes</td>
+            </tr>
+            <tr>
+                <td>Generated mix file</td>
+                <td>To let you download it</td>
+                <td>24 hours, then deleted automatically</td>
+            </tr>
+            <tr>
+                <td>Anonymous identity cookie</td>
+                <td>To attribute exports and subscriptions without an account</td>
+                <td>Up to 12 months, or until you clear cookies</td>
+            </tr>
+            <tr>
+                <td>Usage counters (exports used, plan state)</td>
+                <td>To apply free-plan limits and unlock Pro</td>
+                <td>Until the identity is cleared</td>
+            </tr>
+            <tr>
+                <td>Billing identifiers (Stripe customer and subscription IDs, status)</td>
+                <td>To manage your subscription and invoices</td>
+                <td>As long as tax and accounting rules require</td>
+            </tr>
+            <tr>
+                <td>Product analytics events</td>
+                <td>To understand which steps fail and improve the engine</td>
+                <td>Per the analytics provider's default retention</td>
+            </tr>
+            <tr>
+                <td>Technical logs (IP address, request path, timings, error references)</td>
+                <td>To keep the service secure and diagnose failures</td>
+                <td>Short-lived server logs</td>
+            </tr>
+        </table>
+
+        <h2>2. No account, no audio archive</h2>
+        <p>
+            There is no sign-up. Your browser is recognised by a signed, random cookie that carries no personal
+            details. Audio is processed to produce your download and is not used to train models, sold, or shared
+            for advertising.
+        </p>
+
+        <h2>3. Legal bases</h2>
+        <ul>
+            <li><strong>Contract</strong> — processing your uploads and managing your subscription.</li>
+            <li><strong>Legitimate interests</strong> — security, abuse prevention, and aggregate product metrics.</li>
+            <li><strong>Consent</strong> — optional analytics where local law requires it; you can withdraw it at any time.</li>
+            <li><strong>Legal obligation</strong> — keeping billing records for tax purposes.</li>
+        </ul>
+
+        <h2>4. Processors we rely on</h2>
+        <ul>
+            <li><strong>Stripe</strong> — payment processing, subscriptions, and invoices.</li>
+            <li><strong>PostHog</strong> — product analytics and feature flags, only when a project token is configured.</li>
+            <li><strong>Our hosting provider</strong> — compute and storage for the engine.</li>
+        </ul>
+        <p>
+            Each processor is bound by a data-processing agreement. Where data leaves your region, transfers rely on
+            standard contractual clauses or an equivalent safeguard.
+        </p>
+
+        <h2>5. Your rights</h2>
+        <p>
+            You can ask for a copy of your data, correction of inaccurate data, deletion, a restriction on
+            processing, or portability, and you can object to processing based on legitimate interests. Because
+            there is no account, most requests are handled by quoting your identity cookie or a Stripe receipt.
+            Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a> and we will respond within one month.
+        </p>
+        <p>
+            You also have the right to complain to your local data-protection authority, including the regulator in
+            {{JURISDICTION}}.
+        </p>
+
+        <h2>6. Security</h2>
+        <p>
+            Traffic is served over HTTPS, cookies are signed and scoped, secrets stay server-side, and outputs live
+            in a private directory that is only reachable through your session. No system is perfect: use a unique
+            password for your Stripe account and tell us about anything suspicious you notice here.
+        </p>
+
+        <h2>7. Children</h2>
+        <p>
+            The service is not directed at children under 16 and we do not knowingly process their data.
+        </p>
+
+        <div class="callout">
+            Deleting your download early is easy: the link expires after 24 hours regardless, and clearing your
+            cookies detaches future visits from the stored identity.
+        </div>
+
+        <h2>8. Changes and contact</h2>
+        <p>
+            Material changes will be announced in the app before they take effect. Questions about this policy?
+            Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.
+        </p>
+    </main>
+
+    <footer class="bar">
+        <p>© {{YEAR}} {{COMPANY_NAME}}</p>
+        <nav>
+            <a href="/terms">Terms</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/refunds">Refunds</a>
+        </nav>
+    </footer>
+</body>
+</html>

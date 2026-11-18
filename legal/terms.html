@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#090d16">
+    <meta name="robots" content="index, follow">
+    <title>Terms of Service — {{COMPANY_NAME}}</title>
+    <style>
+        :root { color-scheme: dark; }
+        * { box-sizing: border-box; }
+        html { background: #090d16; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+            color: #e2e8f0;
+            line-height: 1.7;
+            background-image:
+                radial-gradient(ellipse 70% 45% at 50% -12%, rgba(56, 189, 248, 0.14), transparent 55%),
+                radial-gradient(ellipse 36% 32% at 100% 0%, rgba(99, 102, 241, 0.12), transparent 46%);
+        }
+        a { color: #7dd3fc; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        header.bar, main, footer.bar { margin: 0 auto; max-width: 46rem; padding: 0 1.25rem; }
+        header.bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding-top: 1.5rem;
+            padding-bottom: 1.5rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .brand { display: flex; align-items: center; gap: 0.6rem; color: #f8fafc; font-weight: 600; }
+        .brand span.mark {
+            display: grid;
+            place-items: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            background: linear-gradient(135deg, #38bdf8, #6366f1);
+        }
+        .brand svg { width: 1rem; height: 1rem; }
+        main { padding-top: 2.5rem; padding-bottom: 3rem; }
+        h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 0.4rem; letter-spacing: -0.02em; color: #fff; }
+        .updated { margin: 0 0 2rem; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.12em; color: #64748b; }
+        h2 { margin: 2rem 0 0.5rem; font-size: 1.05rem; color: #f1f5f9; }
+        p, li { color: #cbd5e1; font-size: 0.95rem; }
+        ul { padding-left: 1.15rem; }
+        li { margin: 0.3rem 0; }
+        .callout {
+            margin: 1.5rem 0;
+            padding: 1rem 1.15rem;
+            border: 1px solid rgba(56, 189, 248, 0.25);
+            border-radius: 0.85rem;
+            background: rgba(56, 189, 248, 0.07);
+            font-size: 0.92rem;
+            color: #e0f2fe;
+        }
+        footer.bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.75rem 1.25rem;
+            justify-content: space-between;
+            padding-top: 1.5rem;
+            padding-bottom: 2.5rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
+            font-size: 0.78rem;
+            color: #64748b;
+        }
+        footer.bar nav { display: flex; flex-wrap: wrap; gap: 1rem; }
+    </style>
+</head>
+<body>
+    <header class="bar">
+        <a class="brand" href="/">
+            <span class="mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 12h2.2l1.6-4.2L10 17l2.6-8.2L14.6 14H21"/>
+                </svg>
+            </span>
+            {{COMPANY_NAME}}
+
+    <main>
+        <h1>Terms of Service</h1>
+        <p class="updated">Last updated {{YEAR}}</p>
+
+        <p>
+            These terms govern your use of {{COMPANY_NAME}}, a browser-based tool that automatically lowers
+            background music while speech is present. By uploading a file or starting a checkout you agree to
+            them. If you do not agree, please stop using the service.
+        </p>
+
+        <h2>1. The service</h2>
+        <p>
+            {{COMPANY_NAME}} analyses the speech in a dialogue track, builds a smooth volume envelope for the
+            music track, and mixes the two into a single file you can download. Speech detection runs on our
+            servers, never in your browser, and every export is produced per request.
+        </p>
+
+        <h2>2. Your content and permissions</h2>
+        <ul>
+            <li>You keep all rights to the audio and video you upload.</li>
+            <li>You confirm you own, or are licensed to use, every track you upload and every output you publish.</li>
+            <li>You grant us a limited licence to store and process those files solely to produce your export.</li>
+            <li>Uploads are limited to 250&nbsp;MB per file and to the maximum length published on the site.</li>
+            <li>Do not upload unlawful material, malware, or content you have no right to process.</li>
+        </ul>
+
+        <h2>3. Free plan and Pro subscription</h2>
+        <p>
+            The free plan includes three exports, each capped at three minutes. Pro is billed at
+            {{PRO_PRICE}} and removes the length cap and the export counter. Payments are handled by Stripe;
+            we never see your card details.
+        </p>
+        <ul>
+            <li>Subscriptions renew automatically until cancelled.</li>
+            <li>You can cancel at any time from the billing portal; access continues until the end of the paid period.</li>
+            <li>Prices may change with reasonable notice before your next renewal.</li>
+            <li>Refunds are covered by our <a href="/refunds">Refund Policy</a>.</li>
+        </ul>
+
+        <h2>4. Availability and limits</h2>
+        <p>
+            The engine processes a bounded number of jobs at once. When the queue is full, requests are rejected
+            with a "server busy" response instead of waiting indefinitely, and you can retry shortly afterwards.
+            We may change limits, pause features, or take the service offline for maintenance.
+        </p>
+
+        <h2>5. Output retention</h2>
+        <p>
+            Rendered outputs are deleted automatically after 24 hours, and the download link stops working at that
+            point. Keep your own copy of anything you want to retain.
+        </p>
+
+        <h2>6. No warranty</h2>
+        <p>
+            The service is provided "as is". Automatic ducking is a creative aid: always review an export before
+            publishing it. To the fullest extent permitted by law we exclude implied warranties of
+            merchantability, fitness for a particular purpose, and non-infringement.
+        </p>
+
+        <h2>7. Limitation of liability</h2>
+        <p>
+            To the fullest extent permitted by law, {{COMPANY_NAME}} is not liable for indirect or consequential
+            loss, lost profits, or lost or corrupted media. Our total liability for any claim is limited to the
+            amount you paid us in the twelve months before the claim.
+        </p>
+
+        <div class="callout">
+            Nothing in these terms excludes liability that cannot lawfully be excluded, including your statutory
+            consumer rights.
+        </div>
+
+        <h2>8. Ending your use</h2>
+        <p>
+            You may stop using the service at any time. We may suspend access if these terms are broken, if
+            payment fails, or if processing your files would put the service or other users at risk.
+        </p>
+
+        <h2>9. Changes</h2>
+        <p>
+            We may update these terms to reflect changes to the product or the law. The revised version takes
+            effect when it is published on this page, and material changes will be announced in the app.
+        </p>
+
+        <h2>10. Governing law and contact</h2>
+        <p>
+            These terms are governed by the laws of {{JURISDICTION}}, and its courts have exclusive jurisdiction.
+            Questions? Email <a href="mailto:{{SUPPORT_EMAIL}}">{{SUPPORT_EMAIL}}</a>.
+        </p>
+    </main>
+
+    <footer class="bar">
+        <p>© {{YEAR}} {{COMPANY_NAME}}</p>
+        <nav>
+            <a href="/terms">Terms</a>
+            <a href="/privacy">Privacy</a>
+            <a href="/refunds">Refunds</a>
+        </nav>
+    </footer>
+</body>
+</html>
+
+        </a>
+        <a href="/">Back to the editor</a>
+    </header>

@@ -295,6 +295,25 @@
             </div>
         </section>
 
+        <section id="demoCard" hidden class="panel mt-8 rounded-2xl p-4 sm:p-6" aria-labelledby="demoTitle">
+            <div class="mb-4 flex items-center justify-between gap-3">
+                <p id="demoTitle" class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Hear the difference</p>
+                <p class="font-mono text-[10px] uppercase tracking-[0.16em] text-slate-600">Same clip, two mixes</p>
+            </div>
+            <div class="grid gap-3 sm:grid-cols-2">
+                <div class="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                    <p class="text-sm font-medium text-slate-100">Original mix</p>
+                    <p class="mt-1 text-xs text-slate-500">Music sits on top of the voice.</p>
+                    <audio id="demoOriginal" class="mt-3 w-full" controls preload="none"></audio>
+                </div>
+                <div class="rounded-xl border border-sky-400/25 bg-sky-400/[0.05] p-3">
+                    <p class="text-sm font-medium text-slate-100">Duck It</p>
+                    <p class="mt-1 text-xs text-slate-500">Music steps back under every line.</p>
+                    <audio id="demoDucked" class="mt-3 w-full" controls preload="none"></audio>
+                </div>
+            </div>
+        </section>
+
         <form id="duckForm" class="panel mt-10 rounded-2xl p-4 sm:p-6" novalidate>
             <div class="mb-4 flex items-center justify-between">
                 <p class="font-mono text-[10px] uppercase tracking-[0.18em] text-slate-500">Workspace</p>
@@ -398,6 +417,9 @@
             <p id="planNote" class="mt-3 text-center text-[11px] text-slate-500">
                 3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.
             </p>
+            <p id="limitHint" class="mt-1 text-center font-mono text-[10px] uppercase tracking-[0.12em] text-slate-600">
+                MP4 · MOV · MP3 · WAV · M4A
+            </p>
         </form>
 
         <section class="panel mt-4 rounded-2xl" aria-labelledby="feedTitle">
@@ -497,9 +519,16 @@
         </div>
     </div>
 
-    <footer class="relative mx-auto flex max-w-5xl flex-col gap-1 px-5 py-8 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-        <p>© 2026 Duck It</p>
-        <p>Powered by FastAPI &amp; PyTorch Silero VAD</p>
+    <footer class="relative mx-auto flex max-w-5xl flex-col gap-2 px-5 py-8 text-xs text-slate-600 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+        <p>© <span id="footerYear">2026</span> <span id="footerCompany">Duck It</span></p>
+        <nav class="flex flex-wrap items-center gap-x-4 gap-y-1" aria-label="Legal and support">
+            <a href="/terms" class="transition hover:text-slate-300">Terms</a>
+            <a href="/privacy" class="transition hover:text-slate-300">Privacy</a>
+            <a href="/refunds" class="transition hover:text-slate-300">Refunds</a>
+            <a id="supportLink" href="mailto:support@duckit.app" class="transition hover:text-slate-300">Support</a>
+            <span class="text-slate-700" aria-hidden="true">·</span>
+            <span>FastAPI &amp; PyTorch Silero VAD</span>
+        </nav>
     </footer>
 
     <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
@@ -545,6 +574,13 @@
         const btnLabel = document.getElementById('btnLabel');
         const successModal = document.getElementById('successModal');
         const successContinue = document.getElementById('successContinue');
+        const demoCard = document.getElementById('demoCard');
+        const demoOriginal = document.getElementById('demoOriginal');
+        const demoDucked = document.getElementById('demoDucked');
+        const footerYear = document.getElementById('footerYear');
+        const footerCompany = document.getElementById('footerCompany');
+        const supportLink = document.getElementById('supportLink');
+        const limitHint = document.getElementById('limitHint');
 
         // Defaults mirror the server; PostHog feature flags can override these so
         // trial limits and pricing copy can be A/B tested without a redeploy.
@@ -1065,11 +1101,49 @@
             renderBilling();
         }
 
+        // Deployment copy lives on the server so pricing, formats and the legal
+        // footer never drift between the API and the page markup.
+        function applyPublicConfig(config) {
+            if (!config || typeof config !== 'object') return;
+
+            const demo = config.demo;
+            if (demoCard && demo && demo.original && demo.ducked) {
+                demoOriginal.src = demo.original;
+                demoDucked.src = demo.ducked;
+                demoCard.hidden = false;
+            }
+
+            if (footerYear) footerYear.textContent = String(new Date().getFullYear());
+            if (footerCompany && typeof config.company_name === 'string' && config.company_name.trim()) {
+                footerCompany.textContent = config.company_name.trim();
+            }
+            if (supportLink && typeof config.support_email === 'string' && config.support_email.trim()) {
+                supportLink.href = 'mailto:' + config.support_email.trim();
+            }
+
+            if (limitHint) {
+                const parts = [];
+                const maxSeconds = Number(config.max_source_seconds);
+                if (Number.isFinite(maxSeconds) && maxSeconds > 0) {
+                    parts.push('Up to ' + minutesLabel(maxSeconds));
+                }
+                const maxMb = Number(config.max_upload_mb);
+                if (Number.isFinite(maxMb) && maxMb > 0) {
+                    parts.push(maxMb + ' MB per file');
+                }
+                if (Array.isArray(config.supported_formats) && config.supported_formats.length) {
+                    parts.push(config.supported_formats.join(' · '));
+                }
+                if (parts.length) limitHint.textContent = parts.join(' · ');
+            }
+        }
+
         async function bootstrapPostHog() {
             try {
                 const response = await fetch('/api/config', { credentials: 'same-origin' });
                 if (!response.ok) return;
                 const config = await response.json();
+                applyPublicConfig(config);
                 const token = config.posthog_project_token;
                 const host = config.posthog_host || 'https://us.i.posthog.com';
                 if (token && token !== 'YOUR_POSTHOG_API_KEY' && window.posthog && typeof window.posthog.init === 'function') {

@@ -1,1 +1,4 @@
 .env
+.duckit-data/
+__pycache__/
+*.pyc
