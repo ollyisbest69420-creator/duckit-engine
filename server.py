@@ -610,7 +610,7 @@ def latest_pending_checkout(identity_id: str, session_id: str | None = None) -> 
 def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
     """Apply a completed Checkout Session; True when Pro is active afterwards."""
     try:
-        session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"])
+        session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"]).to_dict()
     except Exception:
         logger.warning("Could not retrieve Checkout Session %s while reconciling", session_id, exc_info=True)
         return False
@@ -1389,7 +1389,7 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
     if not session_id.startswith("cs_"):
         raise HTTPException(status_code=422, detail={"code": "invalid_checkout_session", "message": "Invalid Checkout Session ID."})
     try:
-        session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"])
+        session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"]).to_dict()
     except Exception as exc:
         raise stripe_error("Checkout verification", exc) from exc
 
@@ -1815,3 +1815,4 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
+
