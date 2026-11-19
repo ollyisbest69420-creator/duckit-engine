@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import html
+import json
 import logging
 import os
 import shutil
@@ -24,17 +25,18 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+
 try:
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
     from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
     from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
     from posthog import Posthog
     from posthog.integrations.asgi import PosthogASGIMiddleware
+
     OBSERVABILITY_AVAILABLE = True
 except ImportError:
-    # Billing and audio processing must remain available when optional analytics
-    # packages are absent or deliberately omitted from a minimal deployment.
     OBSERVABILITY_AVAILABLE = False
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logging.basicConfig(level=logging.INFO)
@@ -44,8 +46,6 @@ BASE_DIR = Path(__file__).resolve().parent
 INDEX_FILE = BASE_DIR / "index.html"
 LEGAL_DIR = BASE_DIR / "legal"
 DEMO_DIR = BASE_DIR / "assets" / "demo"
-# Tests and one-off tooling can point the engine at a disposable working
-# directory so a local run never mutates the deployment database.
 DATA_DIR = Path(os.environ.get("DUCKIT_DATA_DIR") or BASE_DIR / ".duckit-data")
 UPLOAD_DIR = DATA_DIR / "uploads"
 OUTPUT_DIR = DATA_DIR / "private-outputs"
@@ -63,8 +63,6 @@ VAD_FRAME_SAMPLES = 512
 COOKIE_NAME = "duckit_identity"
 COOKIE_MAX_AGE = 365 * 24 * 60 * 60
 
-# Accepted containers. MP4/MOV carry video too; only their first audio stream is
-# decoded, so phone footage and editor exports can be used directly.
 MEDIA_EXTENSIONS = {
     ".mp3": "MP3",
     ".mp2": "MP2",
@@ -101,21 +99,14 @@ MEDIA_MIME_TYPES = {
     "application/ogg",
 }
 
-# The formats advertised to users; every one of them is exercised by the upload
-# probe before any audio work starts.
 SUPPORTED_FORMAT_LABELS = ["MP4", "MOV", "MP3", "WAV", "M4A"]
 
-# Envelope shape: 0.3-0.5 s attacks and releases remove audible steps at every
-# speech boundary without eating short utterances.
 VAD_ENTER_THRESHOLD = 0.50
 VAD_EXIT_THRESHOLD = 0.35
 MIN_SPEECH_SECONDS = 0.06
-# Energy window used to scale ducking depth, in dBFS.
 RMS_FLOOR_DB = -45.0
 RMS_CEIL_DB = -18.0
-# Quiet-but-real speech still receives this share of the full ducking depth.
 ADAPTIVE_FLOOR = 0.35
-# One heavy job at a time keeps a small instance responsive; further jobs wait.
 MAX_QUEUED_JOBS = 3
 
 
@@ -130,14 +121,10 @@ class Settings(BaseSettings):
     posthog_project_token: str = ""
     posthog_host: str = ""
     environment: str = "development"
-    # Public-facing copy and legal identity. Override per deployment so the
-    # footer, policies and pricing never drift from the real merchant details.
     support_email: str = "support@duckit.app"
     company_name: str = "Duck It"
     pro_price_label: str = "£9/mo"
     legal_jurisdiction: str = "England and Wales"
-    # Engine tuning. Length is bounded so one worker is never asked to analyse
-    # an implausibly long file in a single request.
     max_source_seconds: int = 60 * 60
     envelope_attack_ms: int = 350
     envelope_release_ms: int = 450
@@ -155,8 +142,6 @@ APP_SESSION_SECRET = settings.app_session_secret
 STRIPE_SECRET_KEY = settings.stripe_secret_key
 STRIPE_WEBHOOK_SECRET = settings.stripe_webhook_secret
 STRIPE_PRICE_PRO_MONTHLY = settings.stripe_price_pro_monthly
-# Clamped so a misconfigured environment cannot disable smoothing or ask a
-# single worker to decode dozens of hours of audio.
 MAX_SOURCE_SECONDS = min(4 * 60 * 60, max(60, settings.max_source_seconds))
 ENVELOPE_ATTACK_MS = min(800, max(50, settings.envelope_attack_ms))
 ENVELOPE_RELEASE_MS = min(800, max(50, settings.envelope_release_ms))
@@ -165,8 +150,12 @@ SUPPORT_EMAIL = settings.support_email.strip() or "support@duckit.app"
 COMPANY_NAME = settings.company_name.strip() or "Duck It"
 PRO_PRICE_LABEL = settings.pro_price_label.strip() or "£9/mo"
 LEGAL_JURISDICTION = settings.legal_jurisdiction.strip() or "England and Wales"
-# HTTPS deployments get secure cookies by default; localhost remains usable.
-COOKIE_SECURE = settings.cookie_secure if settings.cookie_secure is not None else APP_BASE_URL.startswith("https://")
+COOKIE_SECURE = (
+    settings.cookie_secure
+    if settings.cookie_secure is not None
+    else APP_BASE_URL.startswith("https://")
+)
+
 posthog_log_provider = None
 posthog_log_logger = logging.getLogger("duckit.posthog_logs")
 posthog_log_logger.setLevel(logging.INFO)
@@ -192,7 +181,9 @@ if settings.posthog_project_token and settings.posthog_host and OBSERVABILITY_AV
     )
     atexit.register(posthog_client.shutdown)
 elif settings.posthog_project_token and settings.posthog_host:
-    logger.warning("PostHog is configured but its optional packages are not installed; analytics is disabled")
+    logger.warning(
+        "PostHog is configured but its optional packages are not installed; analytics is disabled"
+    )
 elif settings.environment != "production":
     if not settings.posthog_project_token:
         logger.warning(
@@ -212,22 +203,67 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
 stripe.api_key = STRIPE_SECRET_KEY
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
-# Silero VAD carries recurrent state between chunks. Serialising access prevents
-# concurrent jobs from contaminating each other's speech decisions.
-vad_lock = threading.Lock()
-# Guard the (potentially slow, network-backed) model download so concurrent jobs
-# cannot race each other through torch.hub.
-vad_load_lock = threading.Lock()
 
-# Heavy audio work is bounded: one job runs, a few wait, the rest are told to
-# retry. Without this a burst of uploads starves the event loop on a small
-# instance. The semaphore is created lazily so it always binds to the running
-# event loop rather than the loop that happened to be active at import time.
+def has_active_stripe_subscription(
+    customer_id: str | None = None, email: str | None = None
+) -> tuple[bool, str | None, str | None]:
+    """Return (is_pro, matched_customer_id, subscription_id) from Stripe."""
+    if not STRIPE_SECRET_KEY:
+        return False, customer_id, None
+
+    try:
+        if customer_id:
+            subs = stripe.Subscription.list(
+                customer=customer_id, status="active", limit=1
+            )
+            if subs.data:
+                return True, customer_id, subs.data[0].id
+
+        if email:
+            customers = stripe.Customer.list(email=email, limit=5)
+            for cust in customers.data:
+                subs = stripe.Subscription.list(
+                    customer=cust.id, status="active", limit=1
+                )
+                if subs.data:
+                    return True, cust.id, subs.data[0].id
+    except Exception:
+        logger.exception("Failed to check active Stripe subscription")
+
+    return False, customer_id, None
+
+
+def load_cookie_payload(request: Request) -> dict[str, Any]:
+    raw = request.cookies.get(COOKIE_NAME)
+    if not raw:
+        return {}
+    try:
+        data = signer.loads(raw, max_age=COOKIE_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return {}
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, str) and data:
+        return {"id": data}
+    return {}
+
+
+def save_cookie_payload(response: Response, payload: dict[str, Any]) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=signer.dumps(payload),
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        path="/",
+    )
+
+
+vad_lock = threading.Lock()
+vad_load_lock = threading.Lock()
 processing_semaphore: "asyncio.Semaphore | None" = None
 job_queue_depth = 0
-
-# Models are intentionally kept process-global so every request reuses a single
-# warm instance instead of reloading weights per job.
 ml_models: dict[str, Any] = {}
 vad_model: Any = None
 vad_load_error: str | None = None
@@ -242,27 +278,15 @@ def _store_vad_model(model: Any, utils: Any, backend: str) -> None:
 
 
 def load_vad_model_safely() -> bool:
-    """Load Silero VAD via torch.hub, preferring ONNX with a JIT fallback.
-
-    Order of preference:
-      1. ONNX runtime (fast + deterministic on CPU) via torch.hub.
-      2. Standard TorchScript (JIT) model via torch.hub.
-      3. A bundled local TorchScript file, for fully offline deployments.
-
-    Every stage is isolated so a failure in one path never prevents the next.
-    ``trust_repo=True`` suppresses torch.hub's interactive trust prompt, which
-    would otherwise raise ``EOFError`` inside a non-interactive web worker.
-    """
+    """Load Silero VAD via torch.hub, preferring ONNX with a JIT fallback."""
     global vad_model, vad_load_error
     if vad_model is not None:
         return True
     with vad_load_lock:
-        # Another request may have loaded the model while we waited on the lock.
         if vad_model is not None:
             return True
         torch.set_num_threads(1)
 
-        # Preferred path: ONNX runtime through torch.hub.
         try:
             logger.info("Loading Silero VAD (ONNX) via torch.hub ...")
             model, utils = torch.hub.load(
@@ -279,7 +303,6 @@ def load_vad_model_safely() -> bool:
         except Exception as exc:
             logger.warning("ONNX Silero VAD load failed; falling back to JIT: %s", exc)
 
-        # Fallback path: the standard TorchScript model through torch.hub.
         try:
             logger.info("Loading Silero VAD (JIT) via torch.hub ...")
             model, utils = torch.hub.load(
@@ -296,7 +319,6 @@ def load_vad_model_safely() -> bool:
         except Exception as exc:
             logger.warning("torch.hub Silero VAD load failed; trying bundled model: %s", exc)
 
-        # Last resort: the bundled TorchScript file (requires no network access).
         try:
             if not MODEL_PATH.is_file():
                 raise FileNotFoundError(f"Local VAD model file not found at {MODEL_PATH}")
@@ -314,11 +336,10 @@ def load_vad_model_safely() -> bool:
             logger.exception("Failed to load the Silero VAD model from any source")
             return False
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global processing_semaphore, job_queue_depth
-    # Rebind per loop: a semaphore created on a previous event loop would raise
-    # when awaited, which matters for tests and --reload restarts.
     processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     job_queue_depth = 0
     load_vad_model_safely()
@@ -384,6 +405,21 @@ if allowed_origins:
     )
 
 
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    csp = (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline' https://us.i.posthog.com https://us-assets.i.posthog.com; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: https://us.i.posthog.com https://us-assets.i.posthog.com; "
+        "connect-src 'self' https://us.i.posthog.com https://us-assets.i.posthog.com; "
+        "worker-src 'self' blob:;"
+    )
+    response.headers["Content-Security-Policy"] = csp
+    return response
+
+
 @contextmanager
 def db():
     connection = sqlite3.connect(DB_PATH, timeout=10)
@@ -428,8 +464,6 @@ def init_db():
                 processed_at INTEGER NOT NULL
             );
 
-            -- Checkout Sessions are recorded at creation time so a delayed or
-            -- missing webhook can still be reconciled on the next status poll.
             CREATE TABLE IF NOT EXISTS checkout_sessions (
                 session_id TEXT PRIMARY KEY,
                 identity_id TEXT NOT NULL,
@@ -443,7 +477,9 @@ def init_db():
         cursor = conn.execute("PRAGMA table_info(identities)")
         columns = [col["name"] for col in cursor.fetchall()]
         if "free_exports_used" not in columns:
-            conn.execute("ALTER TABLE identities ADD COLUMN free_exports_used INTEGER NOT NULL DEFAULT 0")
+            conn.execute(
+                "ALTER TABLE identities ADD COLUMN free_exports_used INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 init_db()
@@ -457,43 +493,81 @@ def user_row(identity_id: str):
         ).fetchone()
 
 
+def ensure_identity_row(identity_id: str, customer_id: str | None = None) -> None:
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO identities (id, stripe_customer_id, free_exports_used, created_at)
+            VALUES (?, ?, 0, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                stripe_customer_id = COALESCE(excluded.stripe_customer_id, identities.stripe_customer_id)
+            """,
+            (identity_id, customer_id, int(time.time())),
+        )
+
+
 def is_pro(user) -> bool:
     return bool(user and user["subscription_status"] in {"active", "trialing"})
 
 
-def set_identity_cookie(response: Response, identity_id: str):
-    token = signer.dumps(identity_id)
-    response.set_cookie(
-        key=COOKIE_NAME,
-        value=token,
-        max_age=COOKIE_MAX_AGE,
-        httponly=True,
-        secure=COOKIE_SECURE,
-        samesite="lax",
-        path="/",
+def sync_pro_status_from_stripe(
+    identity_id: str,
+    customer_id: str | None = None,
+    email: str | None = None,
+) -> dict[str, Any]:
+    ensure_identity_row(identity_id, customer_id=customer_id)
+    pro_active, matched_customer_id, subscription_id = has_active_stripe_subscription(
+        customer_id=customer_id,
+        email=email,
     )
+    status = "active" if pro_active else "none"
+
+    with db() as conn:
+        conn.execute(
+            """
+            UPDATE identities
+            SET stripe_customer_id = COALESCE(?, stripe_customer_id),
+                subscription_id = COALESCE(?, subscription_id),
+                subscription_status = CASE
+                    WHEN ? = 'active' THEN 'active'
+                    ELSE subscription_status
+                END
+            WHERE id = ?
+            """,
+            (matched_customer_id, subscription_id, status, identity_id),
+        )
+
+    row = user_row(identity_id)
+    effective_pro = is_pro(row) or pro_active
+    return {
+        "identity_id": identity_id,
+        "stripe_customer_id": (row["stripe_customer_id"] if row else None) or matched_customer_id,
+        "subscription_id": (row["subscription_id"] if row else None) or subscription_id,
+        "subscription_status": "active" if effective_pro else (row["subscription_status"] if row else "none"),
+        "is_pro": effective_pro,
+    }
 
 
 def current_identity(request: Request, response: Response) -> str:
-    identity_id = None
-    token = request.cookies.get(COOKIE_NAME)
+    payload = load_cookie_payload(request)
+    candidate = payload.get("id")
+    customer_id = payload.get("customer_id")
+    email = payload.get("email")
 
-    if token:
-        try:
-            candidate = signer.loads(token, max_age=COOKIE_MAX_AGE)
-            if user_row(candidate):
-                identity_id = candidate
-        except (BadSignature, SignatureExpired):
-            pass
-
-    if not identity_id:
+    if isinstance(candidate, str) and candidate:
+        identity_id = candidate
+        if not user_row(identity_id):
+            ensure_identity_row(identity_id, customer_id=customer_id if isinstance(customer_id, str) else None)
+            if customer_id or email:
+                sync_pro_status_from_stripe(
+                    identity_id,
+                    customer_id=customer_id if isinstance(customer_id, str) else None,
+                    email=email if isinstance(email, str) else None,
+                )
+    else:
         identity_id = uuid.uuid4().hex
-        with db() as conn:
-            conn.execute(
-                "INSERT INTO identities (id, free_exports_used, created_at) VALUES (?, 0, ?)",
-                (identity_id, int(time.time())),
-            )
-        set_identity_cookie(response, identity_id)
+        ensure_identity_row(identity_id)
+        save_cookie_payload(response, {"id": identity_id})
 
     if posthog_client:
         posthog_client.identify_context(identity_id)
@@ -501,7 +575,7 @@ def current_identity(request: Request, response: Response) -> str:
     return identity_id
 
 
-def entitlement_payload(identity_id: str):
+def entitlement_payload(identity_id: str) -> dict[str, Any]:
     user = user_row(identity_id)
     pro = is_pro(user)
     used = user["free_exports_used"] if user else 0
@@ -516,12 +590,6 @@ def entitlement_payload(identity_id: str):
 
 
 def feature_flags_for(identity_id: str) -> dict[str, Any]:
-    """Evaluate every PostHog feature flag for an identity.
-
-    Returns an empty mapping whenever PostHog is unavailable or the request
-    fails, so callers can always fall back to their defaults without branching
-    on configuration or network state.
-    """
     if not posthog_client:
         return {}
     try:
@@ -533,7 +601,6 @@ def feature_flags_for(identity_id: str) -> dict[str, Any]:
 
 
 def experiment_value(identity_id: str, key: str, default: Any) -> Any:
-    """Return a single feature-flag value, falling back to ``default``."""
     value = feature_flags_for(identity_id).get(key)
     return default if value is None else value
 
@@ -557,7 +624,6 @@ def require_billing_config(require_price: bool = False) -> None:
 
 
 def stripe_id(value) -> str | None:
-    """Return an ID from a Stripe string or expanded object without assuming either shape."""
     if isinstance(value, str):
         return value
     if value is not None and hasattr(value, "get"):
@@ -569,12 +635,14 @@ def stripe_error(operation: str, exc: Exception) -> HTTPException:
     logger.exception("Stripe failed while %s", operation)
     return HTTPException(
         status_code=502,
-        detail={"code": "stripe_error", "message": f"Stripe could not complete {operation}. Please try again.", "operation": operation},
+        detail={
+            "code": "stripe_error",
+            "message": f"Stripe could not complete {operation}. Please try again.",
+            "operation": operation,
+        },
     )
 
 
-# Status polling reconciles against Stripe at most once per identity per window:
-# a late webhook must never turn every poll into a Stripe API call.
 RECONCILE_INTERVAL_SECONDS = 4.0
 reconcile_clock_lock = threading.Lock()
 reconcile_attempts: dict[str, float] = {}
@@ -588,7 +656,6 @@ def should_reconcile(identity_id: str) -> bool:
             return False
         reconcile_attempts[identity_id] = now
         if len(reconcile_attempts) > 10_000:
-            # Entries only matter for a few seconds, so prune on growth.
             cutoff = now - RECONCILE_INTERVAL_SECONDS
             for key in [key for key, stamp in reconcile_attempts.items() if stamp < cutoff]:
                 reconcile_attempts.pop(key, None)
@@ -613,7 +680,6 @@ def set_checkout_session_status(session_id: str, status: str) -> None:
 
 
 def latest_pending_checkout(identity_id: str, session_id: str | None = None) -> str | None:
-    """Return a Checkout Session this browser may still be waiting on."""
     with db() as conn:
         if session_id:
             row = conn.execute(
@@ -634,7 +700,6 @@ def latest_pending_checkout(identity_id: str, session_id: str | None = None) -> 
 
 
 def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
-    """Apply a completed Checkout Session; True when Pro is active afterwards."""
     try:
         session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"]).to_dict()
     except Exception:
@@ -643,8 +708,6 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
 
     user = user_row(identity_id)
     expected_customer = user["stripe_customer_id"] if user else None
-    # The same ownership checks the /verify endpoint enforces: a session ID must
-    # never grant Pro access to a different browser.
     if session.get("mode") != "subscription" or session.get("client_reference_id") != identity_id:
         return False
     if expected_customer and stripe_id(session.get("customer")) != expected_customer:
@@ -674,7 +737,6 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
 
 
 def reconcile_subscription(identity_id: str, subscription_id: str) -> bool:
-    """Refresh a known subscription so renewals and cancellations self-heal."""
     try:
         subscription = stripe.Subscription.retrieve(subscription_id)
     except Exception:
@@ -702,12 +764,6 @@ def record_stripe_event(event_id: str) -> None:
 
 
 def reserve_free_export(identity_id: str, limit: int) -> bool:
-    """Atomically claim one free export before the heavy work starts.
-
-    A single conditional UPDATE keeps two concurrent uploads from both passing
-    the entitlement check, and claiming up front means a failed job cannot burn
-    quota silently.
-    """
     with db() as conn:
         result = conn.execute(
             "UPDATE identities SET free_exports_used = free_exports_used + 1 "
@@ -718,7 +774,6 @@ def reserve_free_export(identity_id: str, limit: int) -> bool:
 
 
 def release_export_reservation(identity_id: str) -> None:
-    """Undo a free-export reservation after a failed job so usage is never lost."""
     with db() as conn:
         conn.execute(
             "UPDATE identities SET free_exports_used = MAX(free_exports_used - 1, 0) WHERE id = ?",
@@ -742,7 +797,6 @@ def cleanup_expired_outputs():
 
 
 def api_error(status_code: int, code: str, message: str, **extra: Any) -> HTTPException:
-    """Build a structured API error so every client can render a stable shape."""
     detail: dict[str, Any] = {"code": code, "message": message}
     detail.update({key: value for key, value in extra.items() if value is not None})
     return HTTPException(status_code=status_code, detail=detail)
@@ -760,7 +814,6 @@ def format_duration_label(seconds: float) -> str:
 
 
 def validate_upload_metadata(upload: UploadFile) -> None:
-    """Reject obviously unsupported files before a large body reaches disk."""
     name = (upload.filename or "").strip()
     suffix = Path(name).suffix.lower()
     if suffix in MEDIA_EXTENSIONS:
@@ -778,11 +831,6 @@ def validate_upload_metadata(upload: UploadFile) -> None:
 
 
 def _probe_duration(probe: dict[str, Any]) -> float:
-    """Read duration from the container, falling back to individual streams.
-
-    Fragmented MP4/MOV files frequently omit ``format.duration``, so stream
-    durations must be considered rather than treated as a corrupt upload.
-    """
     candidates = [probe.get("format", {}).get("duration")]
     for stream in probe.get("streams", []) or []:
         candidates.append(stream.get("duration"))
@@ -803,7 +851,6 @@ def probe_media(
     max_seconds: float | None = None,
     request_id: str | None = None,
 ) -> dict[str, Any]:
-    """Inspect an upload before processing and fail with a structured error."""
     if not FFPROBE_AVAILABLE:
         raise api_error(503, "ffprobe_unavailable", "Media inspection is unavailable on this server.")
     try:
@@ -862,7 +909,6 @@ def probe_media(
 
 
 def audio_channels(path: Path) -> int:
-    """Best-effort channel count for an intermediate file (0 when unknown)."""
     try:
         probe = ffmpeg.probe(str(path))
     except Exception:
@@ -878,7 +924,6 @@ def audio_channels(path: Path) -> int:
 
 @asynccontextmanager
 async def engine_slot():
-    """Bound concurrent audio jobs so a burst of uploads cannot starve the loop."""
     global job_queue_depth, processing_semaphore
     if job_queue_depth >= MAX_CONCURRENT_JOBS + MAX_QUEUED_JOBS:
         raise api_error(
@@ -898,15 +943,12 @@ async def engine_slot():
 
 
 class AudioPipelineError(RuntimeError):
-    """A safe, step-specific error for a failing external audio operation."""
-
     def __init__(self, step: str, message: str):
         super().__init__(message)
         self.step = step
 
 
 def run_ffmpeg(stream, step: str) -> None:
-    """Run FFmpeg and retain its diagnostic output in server logs, never the client."""
     try:
         stream.run(overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
     except ffmpeg.Error as exc:
@@ -919,7 +961,6 @@ def run_ffmpeg(stream, step: str) -> None:
 
 
 async def save_upload(upload: UploadFile, path: Path):
-    """Persist an upload without blocking the event loop on disk writes."""
     total = 0
     output = await run_in_threadpool(path.open, "wb")
     try:
@@ -934,15 +975,11 @@ async def save_upload(upload: UploadFile, path: Path):
                 )
             await run_in_threadpool(output.write, chunk)
     finally:
-        # Close before the request handler unlinks the file: Windows refuses to
-        # delete a path that still has an open handle.
         await run_in_threadpool(output.close)
         await upload.close()
 
 
 def prepare_vad_audio(input_path: Path, output_path: Path, duration: float | None = None):
-    # Only the first audio stream is decoded: MP4/MOV uploads may carry large
-    # video streams that must never enter the filter graph.
     output_kwargs = {
         "ar": 16000,
         "ac": 1,
@@ -961,22 +998,18 @@ def prepare_vad_audio(input_path: Path, output_path: Path, duration: float | Non
 
 
 class SpeechRegion(NamedTuple):
-    """A detected speech span in 16 kHz samples, with its relative energy."""
-
     start: int
     end: int
     strength: float
 
 
 def _unpack_region(region) -> tuple[int, int, float]:
-    """Accept both SpeechRegion and legacy (start, end) pairs."""
     if len(region) >= 3:
         return int(region[0]), int(region[1]), float(region[2])
     return int(region[0]), int(region[1]), 1.0
 
 
 def frame_strength(frame: np.ndarray) -> float:
-    """Map a frame's RMS level onto 0..1 so quiet speech ducks less deeply."""
     if frame.size == 0:
         return 0.0
     energy = np.asarray(frame, dtype=np.float64)
@@ -988,17 +1021,14 @@ def frame_strength(frame: np.ndarray) -> float:
 
 
 def detect_speech_samples(vad_path: Path, threshold: float | None = None) -> list[SpeechRegion]:
-    """Return speech regions in samples at the fixed 16 kHz VAD rate.
-
-    Hysteresis (enter 0.50 / exit 0.35) stops the model chattering around a
-    single threshold, and every region carries its mean frame energy so ducking
-    depth can follow how loud the speaker actually is.
-    """
     if vad_model is None:
         raise RuntimeError("VAD model is unavailable")
     samples, sample_rate = sf.read(str(vad_path), dtype="float32", always_2d=False)
     if sample_rate != VAD_SAMPLE_RATE:
-        raise AudioPipelineError("reading VAD audio", f"Expected {VAD_SAMPLE_RATE} Hz dialogue audio, got {sample_rate} Hz")
+        raise AudioPipelineError(
+            "reading VAD audio",
+            f"Expected {VAD_SAMPLE_RATE} Hz dialogue audio, got {sample_rate} Hz",
+        )
     wav = torch.from_numpy(np.asarray(samples, dtype=np.float32).reshape(-1))
     if not len(wav):
         return []
@@ -1008,7 +1038,7 @@ def detect_speech_samples(vad_path: Path, threshold: float | None = None) -> lis
     min_samples = max(1, round(MIN_SPEECH_SECONDS * VAD_SAMPLE_RATE))
 
     regions: list[SpeechRegion] = []
-    chunk_size = VAD_FRAME_SAMPLES  # Required frame size for the 16 kHz Silero JIT model.
+    chunk_size = VAD_FRAME_SAMPLES
     in_speech = False
     start_sample = 0
     strength_sum = 0.0
@@ -1020,13 +1050,11 @@ def detect_speech_samples(vad_path: Path, threshold: float | None = None) -> lis
             mean_strength = strength_sum / strength_frames if strength_frames else 0.0
             regions.append(SpeechRegion(start_sample, end, mean_strength))
 
-    # reset_states() and inference must be one critical section: this model is stateful.
     with vad_lock, torch.inference_mode():
         if hasattr(vad_model, "reset_states"):
             vad_model.reset_states()
         for frame_index, offset in enumerate(range(0, len(wav), chunk_size), start=1):
             chunk = wav[offset : offset + chunk_size]
-            # Padding ensures a final partial frame is evaluated instead of dropped.
             if len(chunk) < chunk_size:
                 chunk = torch.nn.functional.pad(chunk, (0, chunk_size - len(chunk)))
             probability = float(vad_model(chunk, 16000).item())
@@ -1049,11 +1077,6 @@ def detect_speech_samples(vad_path: Path, threshold: float | None = None) -> lis
 
 
 def merge_regions(regions: list, join_samples: int) -> list[SpeechRegion]:
-    """Join neighbouring regions so fades never restore volume during speech.
-
-    A joined region keeps a mean strength over its spoken samples only: bridging
-    a short pause must not make real speech look quieter than it is.
-    """
     merged: list[SpeechRegion] = []
     for region in regions:
         start, end, strength = _unpack_region(region)
@@ -1074,7 +1097,6 @@ def merge_regions(regions: list, join_samples: int) -> list[SpeechRegion]:
 
 
 def music_regions(vad_regions: list, music_sr: int, join_seconds: float) -> list[SpeechRegion]:
-    """Map VAD's fixed 16 kHz sample coordinates to the music stream exactly once."""
     scale = music_sr / VAD_SAMPLE_RATE
     join_samples = max(0, round(join_seconds * VAD_SAMPLE_RATE))
     mapped: list[SpeechRegion] = []
@@ -1087,13 +1109,11 @@ def music_regions(vad_regions: list, music_sr: int, join_seconds: float) -> list
 
 
 def smoothstep(progress):
-    """Classic 3t² − 2t³ ease, used for every envelope ramp."""
     values = np.asarray(progress, dtype=np.float32)
     return values * values * (3.0 - 2.0 * values)
 
 
 def region_target_gain(strength: float, duck_vol: float) -> float:
-    """Ducking depth for one region: quiet speech ducks less than loud speech."""
     scaled = ADAPTIVE_FLOOR + (1.0 - ADAPTIVE_FLOOR) * float(np.clip(strength, 0.0, 1.0))
     return float(np.clip(1.0 - scaled * (1.0 - duck_vol), duck_vol, 1.0))
 
@@ -1106,13 +1126,6 @@ def gain_curve_for_block(
     release_samples: int,
     duck_vol: float,
 ) -> np.ndarray:
-    """Return a bounded one-dimensional gain curve for exactly one PCM block.
-
-    Each region ramps down over ``attack_samples``, holds its own adaptive
-    target, then ramps back up over ``release_samples``. Ramps shrink for very
-    short regions so the curve can never invert, and overlapping segments keep
-    the quieter value so music is never amplified.
-    """
     gain = np.ones(frame_count, dtype=np.float32)
     block_end = block_start + frame_count
     duck_vol = float(np.clip(duck_vol, 0.0, 1.0))
@@ -1122,7 +1135,6 @@ def gain_curve_for_block(
         speech_start, speech_end, strength = _unpack_region(region)
         if speech_end <= speech_start:
             continue
-        # A ramp can never be longer than half of the region it belongs to.
         half_span = max(1, (speech_end - speech_start) // 2)
         attack = min(attack_samples, half_span)
         release = min(release_samples, half_span)
@@ -1153,14 +1165,11 @@ def render_ducked_music(
     attack_seconds: float | None = None,
     release_seconds: float | None = None,
 ):
-    """Stream music in bounded blocks: no whole-track matrices or shape mismatches."""
     attack_seconds = (ENVELOPE_ATTACK_MS / 1000.0) if attack_seconds is None else attack_seconds
     release_seconds = (ENVELOPE_RELEASE_MS / 1000.0) if release_seconds is None else release_seconds
     pcm_path = output_path.with_name(f"{output_path.stem}-source.wav")
     try:
         run_ffmpeg(
-            # Only the first audio stream is decoded, so a video container's
-            # picture track never reaches the sample buffer.
             ffmpeg.input(str(music_path)).output(
                 str(pcm_path), acodec="pcm_s16le", format="wav", map="0:a:0"
             ),
@@ -1171,12 +1180,14 @@ def render_ducked_music(
                 raise AudioPipelineError("reading decoded music", "The music track contains no PCM audio.")
             attack_samples = max(1, round(attack_seconds * source.samplerate))
             release_samples = max(1, round(release_seconds * source.samplerate))
-            # Pauses shorter than a release are bridged: restoring the music for
-            # half a beat would be more distracting than leaving it down.
             regions = music_regions(vad_regions, source.samplerate, release_seconds)
             with sf.SoundFile(
-                str(output_path), mode="w", samplerate=source.samplerate,
-                channels=source.channels, format="WAV", subtype="PCM_16",
+                str(output_path),
+                mode="w",
+                samplerate=source.samplerate,
+                channels=source.channels,
+                format="WAV",
+                subtype="PCM_16",
             ) as destination:
                 frame_offset = 0
                 while True:
@@ -1198,9 +1209,6 @@ def render_ducked_music(
 
 
 def mix_audio(dialogue_path: Path, ducked_music_path: Path, output_path: Path, max_seconds: float | None = None):
-    """Run the final FFmpeg encode off the event loop."""
-    # libmp3lame refuses streams whose channel layouts disagree, so the mix is
-    # normalised explicitly: mono only when both sources are genuinely mono.
     music_channels = audio_channels(ducked_music_path)
     dialogue_channels = audio_channels(dialogue_path)
     output_channels = 1 if music_channels == 1 and dialogue_channels == 1 else 2
@@ -1231,8 +1239,6 @@ def homepage():
     return FileResponse(INDEX_FILE, headers={"Cache-Control": "no-store"})
 
 
-# /assets is deliberately not mounted: it holds working files from local runs.
-# Only the two pre-rendered demo clips are published from this directory.
 DEMO_ASSETS = {"original": "original.mp3", "ducked": "ducked.mp3"}
 
 
@@ -1259,7 +1265,6 @@ LEGAL_PAGES = {
 
 
 def render_legal_page(filename: str) -> str:
-    """Fill a legal template from deployment configuration, escaping values."""
     path = LEGAL_DIR / filename
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Not found.")
@@ -1326,21 +1331,20 @@ def health_check():
 
 @app.get("/api/billing/status")
 def billing_status(
+    request: Request,
+    response: Response,
     session_id: str | None = None,
     identity_id: str = Depends(current_identity),
 ):
-    """Return entitlement, reconciling a pending Checkout the webhook missed.
-
-    Webhook delivery can lag by seconds, and a misconfigured endpoint can drop
-    events entirely. Rather than making the browser wait, the status poll is the
-    self-healing path: it re-checks the newest pending Checkout Session (or the
-    known subscription) against Stripe, throttled to one call per identity per
-    window so polling stays cheap.
-    """
     payload = entitlement_payload(identity_id)
     payload["pending_checkout"] = False
     payload["reconciling"] = False
     payload["retry_after_ms"] = 0
+
+    cookie_data = load_cookie_payload(request)
+    cookie_customer_id = cookie_data.get("customer_id") if isinstance(cookie_data.get("customer_id"), str) else None
+    cookie_email = cookie_data.get("email") if isinstance(cookie_data.get("email"), str) else None
+
     if payload["pro"] or not STRIPE_SECRET_KEY:
         return payload
 
@@ -1349,15 +1353,28 @@ def billing_status(
     candidate = latest_pending_checkout(identity_id, session_id)
     user = user_row(identity_id)
     subscription_id = user["subscription_id"] if user else None
+    customer_id = (user["stripe_customer_id"] if user else None) or cookie_customer_id
     payload["pending_checkout"] = candidate is not None
 
-    if (candidate or subscription_id) and should_reconcile(identity_id):
+    if (candidate or subscription_id or customer_id or cookie_email) and should_reconcile(identity_id):
         payload["reconciling"] = True
-        reconciled = (
-            reconcile_checkout_session(candidate, identity_id)
-            if candidate
-            else reconcile_subscription(identity_id, subscription_id)
-        )
+        reconciled = False
+        if candidate:
+            reconciled = reconcile_checkout_session(candidate, identity_id)
+        if not reconciled and subscription_id:
+            reconciled = reconcile_subscription(identity_id, subscription_id)
+        if not reconciled and (customer_id or cookie_email):
+            synced = sync_pro_status_from_stripe(identity_id, customer_id=customer_id, email=cookie_email)
+            reconciled = bool(synced.get("is_pro"))
+            if synced.get("stripe_customer_id"):
+                save_cookie_payload(
+                    response,
+                    {
+                        "id": identity_id,
+                        "customer_id": synced["stripe_customer_id"],
+                        **({"email": cookie_email} if cookie_email else {}),
+                    },
+                )
         if reconciled:
             return entitlement_payload(identity_id)
         payload["pending_checkout"] = latest_pending_checkout(identity_id) is not None
@@ -1369,23 +1386,11 @@ def billing_status(
 
 @app.get("/api/experiments")
 def experiments(identity_id: str = Depends(current_identity)):
-    """Return PostHog feature-flag variants for the connected identity.
-
-    Evaluated server-side against the signed cookie identity so a single
-    assignment can drive both UI copy and privileged logic (for example the
-    free-export limit) for the same user.
-    """
     return {"flags": feature_flags_for(identity_id), "identity_id": identity_id}
 
 
 @app.get("/api/config")
 def public_config():
-    """Public bootstrap values for the frontend.
-
-    The PostHog project token is a publishable key by design (it is embedded in
-    client-side JavaScript), so it is safe to expose. No secrets (Stripe keys,
-    session secret, webhook secret) are ever returned here.
-    """
     return {
         "posthog_project_token": settings.posthog_project_token or "",
         "posthog_host": settings.posthog_host or "",
@@ -1399,7 +1404,6 @@ def public_config():
             "attack_ms": ENVELOPE_ATTACK_MS,
             "release_ms": ENVELOPE_RELEASE_MS,
         },
-        # The demo player hides itself when the clips have not been generated.
         "demo": (
             {"original": "/demo/original", "ducked": "/demo/ducked"}
             if (DEMO_DIR / "original.mp3").is_file() and (DEMO_DIR / "ducked.mp3").is_file()
@@ -1409,11 +1413,17 @@ def public_config():
 
 
 @app.post("/api/billing/verify")
-def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depends(current_identity)):
-    """Synchronously reconcile a successful Checkout return before the webhook arrives."""
+def verify_checkout_session(
+    response: Response,
+    session_id: str = Form(...),
+    identity_id: str = Depends(current_identity),
+):
     require_billing_config()
     if not session_id.startswith("cs_"):
-        raise HTTPException(status_code=422, detail={"code": "invalid_checkout_session", "message": "Invalid Checkout Session ID."})
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_checkout_session", "message": "Invalid Checkout Session ID."},
+        )
     try:
         session = stripe.checkout.Session.retrieve(session_id, expand=["subscription"]).to_dict()
     except Exception as exc:
@@ -1426,7 +1436,6 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
         or session.get("client_reference_id") != identity_id
         or (expected_customer and stripe_id(session.get("customer")) != expected_customer)
     ):
-        # A Checkout Session ID must never be usable to grant a different browser Pro access.
         raise HTTPException(status_code=403, detail="That Checkout session does not belong to this browser.")
     if session.get("status") != "complete":
         raise HTTPException(status_code=409, detail="Checkout has not completed yet.")
@@ -1445,12 +1454,26 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
         logger.exception("Could not persist verified Stripe subscription")
         raise HTTPException(
             status_code=500,
-            detail={"code": "billing_state_error", "message": "Payment was verified but subscription access could not be saved. Please contact support."},
+            detail={
+                "code": "billing_state_error",
+                "message": "Payment was verified but subscription access could not be saved. Please contact support.",
+            },
         ) from exc
+
+    customer_id = stripe_id(session.get("customer")) or (user["stripe_customer_id"] if user else None)
+    customer_email = (session.get("customer_details") or {}).get("email") or session.get("customer_email")
+    cookie_payload: dict[str, Any] = {"id": identity_id}
+    if customer_id:
+        cookie_payload["customer_id"] = customer_id
+    if customer_email:
+        cookie_payload["email"] = customer_email
+    save_cookie_payload(response, cookie_payload)
+
     set_checkout_session_status(session_id, "complete")
     if posthog_client:
         posthog_client.capture(
             "subscription_activated",
+            distinct_id=identity_id,
             properties={
                 "plan": "pro",
                 "activation_source": "checkout_verification",
@@ -1460,12 +1483,16 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
 
 
 @app.post("/api/billing/checkout")
-def create_checkout(identity_id: str = Depends(current_identity)):
+def create_checkout(response: Response, identity_id: str = Depends(current_identity)):
     require_billing_config(require_price=True)
 
+    ensure_identity_row(identity_id)
     user = user_row(identity_id)
     if user is None:
-        raise HTTPException(status_code=401, detail={"code": "identity_missing", "message": "Your browser session could not be loaded. Refresh and try again."})
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "identity_missing", "message": "Your browser session could not be loaded. Refresh and try again."},
+        )
     if is_pro(user):
         raise HTTPException(status_code=409, detail="Your Pro subscription is already active.")
 
@@ -1481,6 +1508,8 @@ def create_checkout(identity_id: str = Depends(current_identity)):
                 "UPDATE identities SET stripe_customer_id = ? WHERE id = ?",
                 (customer_id, identity_id),
             )
+
+    save_cookie_payload(response, {"id": identity_id, "customer_id": customer_id})
 
     try:
         checkout = stripe.checkout.Session.create(
@@ -1498,12 +1527,12 @@ def create_checkout(identity_id: str = Depends(current_identity)):
         raise stripe_error("Checkout creation", exc) from exc
     if not checkout.url:
         raise HTTPException(status_code=502, detail={"code": "stripe_error", "message": "Stripe did not return a Checkout URL."})
-    # Recorded before the redirect so a dropped webhook can still be reconciled
-    # the next time this browser asks for its billing status.
+
     remember_checkout_session(checkout.id, identity_id)
     if posthog_client:
         posthog_client.capture(
             "checkout_started",
+            distinct_id=identity_id,
             properties={"plan": "pro", "billing_interval": "monthly"},
         )
     return {"url": checkout.url}
@@ -1540,7 +1569,6 @@ async def duck_audio(
     vad_path = UPLOAD_DIR / f"{run_id}-vad.wav"
     ducked_music_path = UPLOAD_DIR / f"{run_id}-ducked-music.wav"
     output_path = OUTPUT_DIR / f"{run_id}.mp3"
-    # Set only once quota is actually claimed, so cleanup can hand it back.
     reserved_free_export = False
 
     try:
@@ -1549,15 +1577,11 @@ async def duck_audio(
             raise api_error(503, "engine_unavailable", "FFmpeg is not installed or not on PATH.")
         if not FFPROBE_AVAILABLE:
             raise api_error(503, "engine_unavailable", "FFprobe is not installed or not on PATH.")
-        # Reject unsupported containers from their metadata before writing bodies.
         validate_upload_metadata(dialogue)
         validate_upload_metadata(music)
         await save_upload(dialogue, dialogue_path)
         await save_upload(music, music_path)
 
-        # Probe before extraction: only the first audio stream is ever decoded, so
-        # a video-only file or an unreadable container fails here with a clear,
-        # actionable message instead of halfway through the pipeline.
         dialogue_info = await run_in_threadpool(
             probe_media, dialogue_path, "dialogue", MAX_SOURCE_SECONDS, run_id
         )
@@ -1583,12 +1607,7 @@ async def duck_audio(
         free_export_limit = MAX_FREE_EXPORTS
         free_clip_seconds = 180.0
         if free_job:
-            # Trial limits can be A/B tested via PostHog feature flags; the
-            # constants above remain the authoritative defaults. Evaluate off the
-            # event loop because the PostHog client performs blocking I/O.
             flags = await run_in_threadpool(feature_flags_for, identity_id)
-            # Multivariate flags arrive as strings, so coerce defensively and
-            # ignore booleans (a malformed flag must never become a limit of 1).
             raw_export_limit = flags.get("free_export_limit", MAX_FREE_EXPORTS)
             if isinstance(raw_export_limit, bool) or raw_export_limit is None:
                 raw_export_limit = MAX_FREE_EXPORTS
@@ -1604,7 +1623,6 @@ async def duck_audio(
             except (TypeError, ValueError):
                 free_clip_seconds = 180.0
             if free_clip_seconds <= 0:
-                # A non-positive cap would silently produce an empty export.
                 free_clip_seconds = 180.0
             current_used = user["free_exports_used"] if user else 0
             if current_used >= free_export_limit:
@@ -1615,8 +1633,6 @@ async def duck_audio(
                     free_export_limit=free_export_limit,
                 )
 
-        # Claim quota atomically before the heavy work: two simultaneous uploads
-        # can no longer both pass the check, and the claim is refunded on failure.
         if free_job:
             reserved_free_export = await run_in_threadpool(
                 reserve_free_export, identity_id, free_export_limit
@@ -1629,19 +1645,13 @@ async def duck_audio(
                     free_export_limit=free_export_limit,
                 )
 
-        # If startup initialisation was skipped or failed, attempt an emergency,
-        # on-the-fly model load before giving up on this request.
         if vad_model is None:
             if not await run_in_threadpool(load_vad_model_safely):
                 raise api_error(
                     503, "engine_unavailable", "The speech detector is unavailable. Please try again shortly."
                 )
 
-        # Free exports are always capped server-side; the browser's trim choice is
-        # a convenience, never the enforcement mechanism.
         processing_duration = min(longest_source, free_clip_seconds) if free_job else None
-        # Everything below is CPU bound and runs in worker threads, one job at a
-        # time, so a burst of uploads cannot starve the event loop.
         async with engine_slot():
             await run_in_threadpool(prepare_vad_audio, dialogue_path, vad_path, processing_duration)
             try:
@@ -1677,7 +1687,6 @@ async def duck_audio(
         filename = "duckit-mix.mp3"
         expires_at = int(time.time()) + OUTPUT_TTL_SECONDS
 
-        # Quota was already claimed before processing, so only the job row is new.
         with db() as conn:
             conn.execute(
                 """
@@ -1694,6 +1703,7 @@ async def duck_audio(
         if posthog_client:
             posthog_client.capture(
                 "audio_ducking_completed",
+                distinct_id=identity_id,
                 properties={
                     "plan": "free" if free_job else "pro",
                     "dialogue_duration_seconds": round(dialogue_info["duration"], 1),
@@ -1725,7 +1735,6 @@ async def duck_audio(
             "download_url": f"/api/jobs/{job_id}/download",
             "exports_remaining": max(0, free_export_limit - exports_used),
             "free_exports_used": exports_used,
-            # Echoed so the UI can report the envelope it actually received.
             "envelope": {
                 "attack_ms": ENVELOPE_ATTACK_MS,
                 "release_ms": ENVELOPE_RELEASE_MS,
@@ -1785,6 +1794,7 @@ def download_job(job_id: str, response: Response, identity_id: str = Depends(cur
     if posthog_client:
         posthog_client.capture(
             "audio_export_downloaded",
+            distinct_id=identity_id,
             properties={
                 "plan": "free" if job["is_free"] else "pro",
                 "output_format": "mp3",
@@ -1804,12 +1814,19 @@ def save_subscription(subscription, identity_hint=None):
 
     with db() as conn:
         if identity_id:
-            result = conn.execute(
-                "UPDATE identities SET stripe_customer_id = COALESCE(?, stripe_customer_id), subscription_id = ?, subscription_status = ? WHERE id = ?",
-                (customer_id, subscription_id, status, identity_id),
+            conn.execute(
+                """
+                INSERT INTO identities (
+                    id, stripe_customer_id, subscription_id, subscription_status, free_exports_used, created_at
+                )
+                VALUES (?, ?, ?, ?, 0, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    stripe_customer_id = COALESCE(excluded.stripe_customer_id, identities.stripe_customer_id),
+                    subscription_id = excluded.subscription_id,
+                    subscription_status = excluded.subscription_status
+                """,
+                (identity_id, customer_id, subscription_id, status, int(time.time())),
             )
-            if result.rowcount != 1:
-                raise ValueError("The Checkout browser identity no longer exists")
         else:
             conn.execute(
                 "UPDATE identities SET subscription_id = ?, subscription_status = ? WHERE stripe_customer_id = ? OR subscription_id = ?",
@@ -1847,8 +1864,6 @@ async def stripe_webhook(request: Request):
         session_id = obj.get("id")
         subscription_id = stripe_id(obj.get("subscription"))
         if session_id:
-            # A completed session may still need async payment confirmation; it
-            # stays "open" in that case and the status poll keeps reconciling.
             status = "complete" if subscription_id else "open"
             await run_in_threadpool(set_checkout_session_status, session_id, status)
         if subscription_id:
@@ -1856,7 +1871,6 @@ async def stripe_webhook(request: Request):
                 subscription = await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
                 await run_in_threadpool(save_subscription, subscription, obj.get("client_reference_id"))
             except Exception:
-                # Return a 5xx: Stripe will safely retry because the event has not been marked seen.
                 logger.exception("Could not apply Stripe checkout event %s", event["id"])
                 raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
@@ -1866,8 +1880,6 @@ async def stripe_webhook(request: Request):
             logger.exception("Could not apply Stripe subscription event %s", event["id"])
             raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type in {"invoice.paid", "invoice.payment_failed", "invoice.payment_action_required"}:
-        # Renewals and dunning never touch entitlement without this: refresh the
-        # subscription so a lapse or recovery is reflected immediately.
         subscription_id = stripe_id(obj.get("subscription"))
         if subscription_id:
             try:
@@ -1888,6 +1900,6 @@ async def stripe_webhook(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("server:app", host="0.0.0.0", port=port)
-
