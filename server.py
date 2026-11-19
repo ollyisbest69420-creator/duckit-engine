@@ -193,6 +193,15 @@ if settings.posthog_project_token and settings.posthog_host and OBSERVABILITY_AV
     atexit.register(posthog_client.shutdown)
 elif settings.posthog_project_token and settings.posthog_host:
     logger.warning("PostHog is configured but its optional packages are not installed; analytics is disabled")
+elif settings.environment != "production":
+    if not settings.posthog_project_token:
+        logger.warning(
+            "POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured"
+        )
+    if not settings.posthog_host:
+        logger.warning(
+            "POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured"
+        )
 
 if not APP_BASE_URL or not APP_SESSION_SECRET:
     raise RuntimeError("APP_BASE_URL and APP_SESSION_SECRET must be set.")
@@ -324,12 +333,29 @@ async def lifespan(app: FastAPI):
         ENVELOPE_ATTACK_MS,
         ENVELOPE_RELEASE_MS,
     )
+    if posthog_log_provider:
+        posthog_log_logger.info(
+            "audio_ducking_engine_started",
+            extra={
+                "event": "audio_ducking_engine_started",
+                "max_source_seconds": MAX_SOURCE_SECONDS,
+                "max_concurrent_jobs": MAX_CONCURRENT_JOBS,
+                "ffmpeg_available": FFMPEG_AVAILABLE,
+                "ffprobe_available": FFPROBE_AVAILABLE,
+            },
+        )
     yield
     if posthog_client:
         try:
             posthog_client.flush()
         except Exception:
             logger.exception("Could not flush PostHog events during shutdown")
+    if posthog_log_provider:
+        try:
+            posthog_log_provider.force_flush(timeout_millis=5_000)
+            posthog_log_provider.shutdown()
+        except Exception:
+            logger.exception("Could not flush PostHog logs during shutdown")
     global vad_model
     vad_model = None
 
@@ -1422,6 +1448,14 @@ def verify_checkout_session(session_id: str = Form(...), identity_id: str = Depe
             detail={"code": "billing_state_error", "message": "Payment was verified but subscription access could not be saved. Please contact support."},
         ) from exc
     set_checkout_session_status(session_id, "complete")
+    if posthog_client:
+        posthog_client.capture(
+            "subscription_activated",
+            properties={
+                "plan": "pro",
+                "activation_source": "checkout_verification",
+            },
+        )
     return entitlement_payload(identity_id)
 
 
@@ -1467,6 +1501,11 @@ def create_checkout(identity_id: str = Depends(current_identity)):
     # Recorded before the redirect so a dropped webhook can still be reconciled
     # the next time this browser asks for its billing status.
     remember_checkout_session(checkout.id, identity_id)
+    if posthog_client:
+        posthog_client.capture(
+            "checkout_started",
+            properties={"plan": "pro", "billing_interval": "monthly"},
+        )
     return {"url": checkout.url}
 
 
@@ -1652,6 +1691,34 @@ async def duck_audio(
         updated_user = user_row(identity_id)
         exports_used = updated_user["free_exports_used"] if updated_user else 0
 
+        if posthog_client:
+            posthog_client.capture(
+                "audio_ducking_completed",
+                properties={
+                    "plan": "free" if free_job else "pro",
+                    "dialogue_duration_seconds": round(dialogue_info["duration"], 1),
+                    "music_duration_seconds": round(music_info["duration"], 1),
+                    "processed_duration_seconds": round(processing_duration or longest_source, 1),
+                    "duck_volume": duck_vol,
+                    "speech_region_count": len(speech_regions),
+                    "free_exports_used": exports_used,
+                },
+            )
+        if posthog_log_provider:
+            posthog_log_logger.info(
+                "audio_ducking_completed",
+                extra={
+                    "event": "audio_ducking_completed",
+                    "plan": "free" if free_job else "pro",
+                    "dialogue_duration_seconds": round(dialogue_info["duration"], 1),
+                    "music_duration_seconds": round(music_info["duration"], 1),
+                    "processed_duration_seconds": round(processing_duration or longest_source, 1),
+                    "duck_volume": duck_vol,
+                    "speech_region_count": len(speech_regions),
+                    "free_exports_used": exports_used,
+                },
+            )
+
         return {
             "job_id": job_id,
             "filename": filename,
@@ -1715,6 +1782,14 @@ def download_job(job_id: str, response: Response, identity_id: str = Depends(cur
     if not job["is_free"] and not is_pro(user_row(identity_id)):
         raise HTTPException(status_code=402, detail={"code": "upgrade_required", "message": "Pro subscription required."})
 
+    if posthog_client:
+        posthog_client.capture(
+            "audio_export_downloaded",
+            properties={
+                "plan": "free" if job["is_free"] else "pro",
+                "output_format": "mp3",
+            },
+        )
     return FileResponse(job["output_path"], media_type="audio/mpeg", filename=job["filename"])
 
 
