@@ -230,15 +230,95 @@ def normalize_email(value: Any) -> str | None:
     return cleaned
 
 
+def as_stripe_dict(obj: Any) -> dict[str, Any]:
+    """Convert any Stripe SDK object (Session, Subscription, Customer, Invoice, etc.) into a plain recursive dict."""
+    if obj is None:
+        return {}
+    if type(obj) is dict:
+        return {
+            k: (
+                as_stripe_dict(v)
+                if hasattr(v, "to_dict") or hasattr(v, "to_dict_recursive") or (isinstance(v, dict) and type(v) is not dict)
+                else v
+            )
+            for k, v in obj.items()
+        }
+    if hasattr(obj, "to_dict_recursive"):
+        try:
+            converted = obj.to_dict_recursive()
+            if isinstance(converted, dict):
+                return converted
+        except Exception:
+            pass
+    if hasattr(obj, "to_dict"):
+        try:
+            converted = obj.to_dict()
+            if isinstance(converted, dict):
+                return {
+                    k: (
+                        as_stripe_dict(v)
+                        if hasattr(v, "to_dict") or hasattr(v, "to_dict_recursive") or (isinstance(v, dict) and type(v) is not dict)
+                        else v
+                    )
+                    for k, v in converted.items()
+                }
+        except Exception:
+            pass
+    if isinstance(obj, dict):
+        result: dict[str, Any] = {}
+        try:
+            for k in dict.keys(obj):
+                v = dict.__getitem__(obj, k)
+                result[k] = (
+                    as_stripe_dict(v)
+                    if hasattr(v, "to_dict") or hasattr(v, "to_dict_recursive") or (isinstance(v, dict) and type(v) is not dict)
+                    else v
+                )
+            return result
+        except Exception:
+            return {}
+    return {}
+
+
+def stripe_field(obj: Any, key: str, default: Any = None) -> Any:
+    """Safely read a key from a dict or Stripe SDK object without calling StripeObject.get()."""
+    if obj is None:
+        return default
+    if type(obj) is dict:
+        return obj.get(key, default)
+    if isinstance(obj, dict):
+        try:
+            return dict.__getitem__(obj, key)
+        except KeyError:
+            return default
+    if hasattr(obj, "to_dict"):
+        try:
+            return obj.to_dict().get(key, default)
+        except Exception:
+            pass
+    return getattr(obj, key, default)
+
+
 def extract_email(obj: Any) -> str | None:
-    if obj is None or not hasattr(obj, "get"):
+    if obj is None or isinstance(obj, str):
         return None
-    details = obj.get("customer_details")
-    if hasattr(details, "get"):
-        detail_email = normalize_email(details.get("email"))
+    obj_dict = as_stripe_dict(obj) if (isinstance(obj, dict) or hasattr(obj, "to_dict") or hasattr(obj, "to_dict_recursive")) else None
+    if obj_dict is not None:
+        details = obj_dict.get("customer_details")
+        if details is not None and not isinstance(details, str):
+            details_dict = as_stripe_dict(details) if isinstance(details, dict) or hasattr(details, "to_dict") else None
+            detail_email = normalize_email(
+                details_dict.get("email") if details_dict is not None else getattr(details, "email", None)
+            )
+            if detail_email:
+                return detail_email
+        return normalize_email(obj_dict.get("customer_email") or obj_dict.get("email"))
+    details = getattr(obj, "customer_details", None)
+    if details is not None:
+        detail_email = normalize_email(stripe_field(details, "email"))
         if detail_email:
             return detail_email
-    return normalize_email(obj.get("customer_email") or obj.get("email"))
+    return normalize_email(getattr(obj, "customer_email", None) or getattr(obj, "email", None))
 
 
 def stripe_key_mode() -> str | None:
@@ -264,8 +344,8 @@ def stripe_search_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _iter_stripe_list(result: Any, limit_items: int | None = None) -> list[Any]:
-    items: list[Any] = []
+def _iter_stripe_list(result: Any, limit_items: int | None = None) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     if result is None:
         return items
     iterator = (
@@ -274,7 +354,9 @@ def _iter_stripe_list(result: Any, limit_items: int | None = None) -> list[Any]:
         else (getattr(result, "data", None) or [])
     )
     for item in iterator:
-        items.append(item)
+        converted = as_stripe_dict(item)
+        if converted:
+            items.append(converted)
         if limit_items is not None and len(items) >= limit_items:
             break
     return items
@@ -293,10 +375,11 @@ STRIPE_STATUS_RANK = {"active": 0, "trialing": 1}
 
 def subscription_sort_key(subscription: Any, identity_id: str) -> tuple:
     """Rank subscriptions so repeated lookups always pick the same one."""
-    metadata = subscription.get("metadata") or {}
-    status = subscription.get("status")
+    sub = as_stripe_dict(subscription)
+    metadata = as_stripe_dict(sub.get("metadata"))
+    status = sub.get("status")
     try:
-        created = int(subscription.get("created") or 0)
+        created = int(sub.get("created") or 0)
     except (TypeError, ValueError):
         created = 0
     owns_identity = metadata.get("duckit_identity_id") == identity_id
@@ -305,11 +388,11 @@ def subscription_sort_key(subscription: Any, identity_id: str) -> tuple:
         STRIPE_STATUS_RANK.get(status, 2),
         0 if owns_identity else 1,
         -created,
-        stripe_id(subscription) or "",
+        stripe_id(sub) or "",
     )
 
 
-def list_customer_subscriptions(customer_id: str) -> list[Any]:
+def list_customer_subscriptions(customer_id: str) -> list[dict[str, Any]]:
     result = stripe.Subscription.list(customer=customer_id, status="all", limit=100)
     return _iter_stripe_list(result, limit_items=200)
 
@@ -326,7 +409,7 @@ def backfill_stripe_customer_email(
     try:
         existing_email = extract_email(customer_obj)
         if not existing_email:
-            fetched = stripe.Customer.retrieve(customer_id)
+            fetched = as_stripe_dict(stripe.Customer.retrieve(customer_id))
             existing_email = extract_email(fetched)
         if not existing_email:
             stripe.Customer.modify(customer_id, email=normalized)
@@ -387,15 +470,16 @@ def find_stripe_subscription(
 
         def has_pro_candidate() -> bool:
             return any(
-                hasattr(sub, "get") and sub.get("status") in STRIPE_PRO_STATUSES
+                stripe_field(sub, "status") in STRIPE_PRO_STATUSES
                 for sub in candidates.values()
             )
 
         def record_checkout_session(sess: Any, fallback_email: str | None = None) -> None:
-            if not hasattr(sess, "get"):
+            sess_dict = as_stripe_dict(sess)
+            if not sess_dict:
                 return
-            sess_email = extract_email(sess) or normalize_email(fallback_email)
-            sess_customer = stripe_id(sess.get("customer"))
+            sess_email = extract_email(sess_dict) or normalize_email(fallback_email)
+            sess_customer = stripe_id(sess_dict.get("customer"))
             if sess_customer:
                 if sess_email:
                     customer_emails.setdefault(sess_customer, sess_email)
@@ -406,22 +490,23 @@ def find_stripe_subscription(
                         logger.warning(
                             "Stripe subscription lookup failed for customer %s", sess_customer, exc_info=True
                         )
-            sess_sub = sess.get("subscription")
+            sess_sub = sess_dict.get("subscription")
             if isinstance(sess_sub, str):
                 if sess_sub and sess_sub not in candidates:
                     try:
-                        sub_obj = stripe.Subscription.retrieve(sess_sub)
+                        sub_obj = as_stripe_dict(stripe.Subscription.retrieve(sess_sub))
                         sub_id = stripe_id(sub_obj)
-                        if sub_id and hasattr(sub_obj, "get"):
+                        if sub_id and sub_obj:
                             candidates[sub_id] = sub_obj
                     except Exception:
                         logger.warning(
                             "Stripe subscription retrieve failed for %s", sess_sub, exc_info=True
                         )
-            elif hasattr(sess_sub, "get"):
-                sub_id = stripe_id(sess_sub)
-                if sub_id:
-                    candidates[sub_id] = sess_sub
+            elif sess_sub is not None:
+                sub_obj = as_stripe_dict(sess_sub)
+                sub_id = stripe_id(sub_obj)
+                if sub_id and sub_obj:
+                    candidates[sub_id] = sub_obj
 
         for query_email in email_queries:
             try:
@@ -492,8 +577,8 @@ def find_stripe_subscription(
                             continue
                         cust_obj = sub.get("customer")
                         inv_obj = sub.get("latest_invoice")
-                        sub_meta = sub.get("metadata") or {}
-                        cust_meta = (cust_obj.get("metadata") or {}) if hasattr(cust_obj, "get") else {}
+                        sub_meta = as_stripe_dict(sub.get("metadata"))
+                        cust_meta = as_stripe_dict(cust_obj.get("metadata")) if isinstance(cust_obj, dict) else {}
                         matched_email = (
                             extract_email(sub)
                             or extract_email(cust_obj)
@@ -577,7 +662,7 @@ def find_stripe_subscription(
         return StripeSubscriptionLookup(checked, None, customer_id, normalized_email)
 
     ordered = sorted(
-        candidates.values(),
+        (as_stripe_dict(sub) for sub in candidates.values()),
         key=lambda subscription: subscription_sort_key(subscription, identity_id),
     )
     best = ordered[0]
@@ -590,7 +675,7 @@ def find_stripe_subscription(
     )
     if not best_email and best_customer_id:
         try:
-            cust_obj = stripe.Customer.retrieve(best_customer_id)
+            cust_obj = as_stripe_dict(stripe.Customer.retrieve(best_customer_id))
             best_email = extract_email(cust_obj)
         except Exception:
             logger.debug("Could not retrieve email for customer %s", best_customer_id, exc_info=True)
@@ -1108,7 +1193,7 @@ def sync_pro_status_from_stripe(
         if remembered:
             try:
                 lookup = StripeSubscriptionLookup(
-                    True, stripe.Subscription.retrieve(remembered), lookup.customer_id, effective_email
+                    True, as_stripe_dict(stripe.Subscription.retrieve(remembered)), lookup.customer_id, effective_email
                 )
             except Exception:
                 logger.warning(
@@ -1254,9 +1339,10 @@ def require_billing_config(require_price: bool = False) -> None:
 
 def stripe_id(value) -> str | None:
     if isinstance(value, str):
-        return value
-    if value is not None and hasattr(value, "get"):
-        return value.get("id")
+        return value or None
+    if value is not None:
+        raw_id = stripe_field(value, "id")
+        return raw_id if isinstance(raw_id, str) and raw_id else None
     return None
 
 
@@ -1426,16 +1512,16 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
         )
         return False
     try:
-        session = stripe.checkout.Session.retrieve(
-            session_id, expand=["subscription", "customer"]
-        ).to_dict()
+        session = as_stripe_dict(
+            stripe.checkout.Session.retrieve(session_id, expand=["subscription", "customer"])
+        )
     except Exception:
         logger.warning("Could not retrieve Checkout Session %s while reconciling", session_id, exc_info=True)
         return False
 
     user = user_row(identity_id)
     expected_customer = user["stripe_customer_id"] if user else None
-    session_metadata = session.get("metadata") or {}
+    session_metadata = as_stripe_dict(session.get("metadata"))
     session_identity = session.get("client_reference_id") or session_metadata.get("duckit_identity_id")
     session_customer_id = stripe_id(session.get("customer"))
     owns_or_adoptable = (
@@ -1458,10 +1544,12 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
         return False
     if isinstance(subscription, str):
         try:
-            subscription = stripe.Subscription.retrieve(subscription)
+            subscription = as_stripe_dict(stripe.Subscription.retrieve(subscription))
         except Exception:
             logger.warning("Could not retrieve subscription %s while reconciling", subscription, exc_info=True)
             return False
+    else:
+        subscription = as_stripe_dict(subscription)
 
     session_email = extract_email(session) or extract_email(session.get("customer"))
     try:
@@ -1478,7 +1566,7 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
 
 def reconcile_subscription(identity_id: str, subscription_id: str) -> bool:
     try:
-        subscription = stripe.Subscription.retrieve(subscription_id)
+        subscription = as_stripe_dict(stripe.Subscription.retrieve(subscription_id))
     except Exception:
         logger.warning("Could not retrieve subscription %s while reconciling", subscription_id, exc_info=True)
         return False
@@ -2239,15 +2327,15 @@ def verify_checkout_session(
             },
         )
     try:
-        session = stripe.checkout.Session.retrieve(
-            session_id, expand=["subscription", "customer"]
-        ).to_dict()
+        session = as_stripe_dict(
+            stripe.checkout.Session.retrieve(session_id, expand=["subscription", "customer"])
+        )
     except Exception as exc:
         raise stripe_error("Checkout verification", exc) from exc
 
     user = user_row(identity_id)
     expected_customer = user["stripe_customer_id"] if user else None
-    session_metadata = session.get("metadata") or {}
+    session_metadata = as_stripe_dict(session.get("metadata"))
     session_identity = session.get("client_reference_id") or session_metadata.get("duckit_identity_id")
     target_identity = identity_id
     if session_identity != identity_id:
@@ -2271,9 +2359,11 @@ def verify_checkout_session(
         raise HTTPException(status_code=409, detail="Checkout did not create a subscription.")
     if isinstance(subscription, str):
         try:
-            subscription = stripe.Subscription.retrieve(subscription)
+            subscription = as_stripe_dict(stripe.Subscription.retrieve(subscription))
         except Exception as exc:
             raise stripe_error("subscription activation", exc) from exc
+    else:
+        subscription = as_stripe_dict(subscription)
     customer_email = extract_email(session) or extract_email(session.get("customer"))
     try:
         save_subscription(subscription, target_identity, email=customer_email)
@@ -2379,9 +2469,9 @@ async def restore_billing_by_email(
             },
         )
 
-    subscription = lookup.subscription
-    found_status = subscription.get("status") if subscription is not None else None
-    if subscription is None or found_status not in STRIPE_PRO_STATUSES:
+    subscription = as_stripe_dict(lookup.subscription) if lookup.subscription is not None else None
+    found_status = stripe_field(subscription, "status") if subscription is not None else None
+    if not subscription or found_status not in STRIPE_PRO_STATUSES:
         logger.warning(
             "Billing restore found no active subscription for identity %s (stripe_mode=%s, latest_status=%s)",
             identity_id,
@@ -2402,7 +2492,7 @@ async def restore_billing_by_email(
         )
 
     resolved_email = lookup.email or email
-    resolved_customer = lookup.customer_id or stripe_id(subscription.get("customer"))
+    resolved_customer = lookup.customer_id or stripe_id(stripe_field(subscription, "customer"))
     await run_in_threadpool(save_subscription, subscription, identity_id, resolved_email)
     await run_in_threadpool(backfill_stripe_customer_email, resolved_customer, resolved_email)
     sync_identity_cookie(
@@ -2448,7 +2538,9 @@ def create_checkout(
             customer = stripe.Customer.create(metadata={"duckit_identity_id": identity_id})
         except Exception as exc:
             raise stripe_error("customer setup", exc) from exc
-        customer_id = customer.id
+        customer_id = stripe_id(customer)
+        if not customer_id:
+            raise HTTPException(status_code=502, detail={"code": "stripe_error", "message": "Stripe did not return a customer ID."})
         ensure_identity_row(identity_id, customer_id=customer_id)
 
     sync_identity_cookie(request, response, identity_id, customer_id=customer_id)
@@ -2467,17 +2559,19 @@ def create_checkout(
         )
     except Exception as exc:
         raise stripe_error("Checkout creation", exc) from exc
-    if not checkout.url:
+    checkout_url = stripe_field(checkout, "url")
+    checkout_id = stripe_id(checkout)
+    if not checkout_url or not checkout_id:
         raise HTTPException(status_code=502, detail={"code": "stripe_error", "message": "Stripe did not return a Checkout URL."})
 
-    remember_checkout_session(checkout.id, identity_id)
+    remember_checkout_session(checkout_id, identity_id)
     if posthog_client:
         posthog_client.capture(
             "checkout_started",
             distinct_id=identity_id,
             properties={"plan": "pro", "billing_interval": "monthly"},
         )
-    return {"url": checkout.url}
+    return {"url": checkout_url}
 
 
 @app.post("/api/billing/portal")
@@ -2531,11 +2625,11 @@ def create_billing_portal(
                         customer=refreshed_customer,
                         return_url=APP_BASE_URL,
                     )
-                    return {"url": portal.url}
+                    return {"url": stripe_field(portal, "url")}
                 except Exception as retry_exc:
                     raise stripe_error("billing portal creation", retry_exc) from retry_exc
         raise stripe_error("billing portal creation", exc) from exc
-    return {"url": portal.url}
+    return {"url": stripe_field(portal, "url")}
 
 
 @app.post("/api/duck", status_code=201)
@@ -2791,28 +2885,29 @@ def customer_details_from_stripe(customer_id: str | None) -> tuple[str | None, s
     if not customer_id or not STRIPE_SECRET_KEY:
         return None, None
     try:
-        customer = stripe.Customer.retrieve(customer_id)
+        customer = as_stripe_dict(stripe.Customer.retrieve(customer_id))
     except Exception:
         logger.warning("Could not retrieve Stripe customer %s", customer_id, exc_info=True)
         return None, None
-    metadata = customer.get("metadata") or {}
+    metadata = as_stripe_dict(customer.get("metadata"))
     candidate = metadata.get("duckit_identity_id")
     cust_identity = candidate if is_identity_id(candidate) else None
     return cust_identity, extract_email(customer)
 
 
 def save_subscription(subscription, identity_hint=None, email: str | None = None):
-    metadata = subscription.get("metadata", {}) or {}
+    sub_dict = as_stripe_dict(subscription)
+    metadata = as_stripe_dict(sub_dict.get("metadata"))
     identity_id = identity_hint if is_identity_id(identity_hint) else metadata.get("duckit_identity_id")
     if not is_identity_id(identity_id):
         identity_id = None
-    customer_id = stripe_id(subscription.get("customer"))
-    subscription_id = stripe_id(subscription)
-    status = subscription.get("status", "none")
+    customer_id = stripe_id(sub_dict.get("customer"))
+    subscription_id = stripe_id(sub_dict)
+    status = sub_dict.get("status", "none")
     if not subscription_id:
         raise ValueError("Stripe returned a subscription without an ID")
 
-    resolved_email = normalize_email(email) or extract_email(subscription.get("customer"))
+    resolved_email = normalize_email(email) or extract_email(sub_dict.get("customer"))
 
     with db() as conn:
         if not identity_id:
@@ -2918,16 +3013,19 @@ async def stripe_webhook(request: Request):
     signature = request.headers.get("stripe-signature", "")
 
     try:
-        event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+        raw_event = stripe.Webhook.construct_event(payload, signature, STRIPE_WEBHOOK_SECRET)
+        event = as_stripe_dict(raw_event)
     except Exception as exc:
         logger.warning("Rejected Stripe webhook with invalid signature: %s", exc)
         raise HTTPException(status_code=400, detail={"code": "invalid_webhook", "message": "Invalid Stripe webhook signature."}) from exc
 
-    if await run_in_threadpool(stripe_event_seen, event["id"]):
+    event_id = event.get("id")
+    if event_id and await run_in_threadpool(stripe_event_seen, event_id):
         return {"received": True}
 
-    event_type = event["type"]
-    obj = event["data"]["object"]
+    event_type = event.get("type")
+    event_data = as_stripe_dict(event.get("data"))
+    obj = as_stripe_dict(event_data.get("object"))
 
     if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
         session_id = obj.get("id")
@@ -2938,7 +3036,9 @@ async def stripe_webhook(request: Request):
             await run_in_threadpool(set_checkout_session_status, session_id, status)
         if subscription_id:
             try:
-                subscription = await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
+                subscription = as_stripe_dict(
+                    await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
+                )
                 await run_in_threadpool(
                     save_subscription, subscription, obj.get("client_reference_id"), session_email
                 )
@@ -2948,30 +3048,33 @@ async def stripe_webhook(request: Request):
                     session_email,
                 )
             except Exception:
-                logger.exception("Could not apply Stripe checkout event %s", event["id"])
+                logger.exception("Could not apply Stripe checkout event %s", event_id)
                 raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type in {"customer.subscription.created", "customer.subscription.updated", "customer.subscription.deleted"}:
         try:
             await run_in_threadpool(save_subscription, obj)
         except Exception:
-            logger.exception("Could not apply Stripe subscription event %s", event["id"])
+            logger.exception("Could not apply Stripe subscription event %s", event_id)
             raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type in {"invoice.paid", "invoice.payment_failed", "invoice.payment_action_required"}:
         subscription_id = stripe_id(obj.get("subscription"))
         invoice_email = normalize_email(obj.get("customer_email"))
         if subscription_id:
             try:
-                subscription = await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
+                subscription = as_stripe_dict(
+                    await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
+                )
                 await run_in_threadpool(save_subscription, subscription, None, invoice_email)
             except Exception:
-                logger.exception("Could not apply Stripe invoice event %s", event["id"])
+                logger.exception("Could not apply Stripe invoice event %s", event_id)
                 raise HTTPException(status_code=500, detail={"code": "webhook_processing_failed", "message": "Could not apply the Stripe subscription event."})
     elif event_type == "checkout.session.expired":
         session_id = obj.get("id")
         if session_id:
             await run_in_threadpool(set_checkout_session_status, session_id, "expired")
 
-    await run_in_threadpool(record_stripe_event, event["id"])
+    if event_id:
+        await run_in_threadpool(record_stripe_event, event_id)
 
     return {"received": True}
 
