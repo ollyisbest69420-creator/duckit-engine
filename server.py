@@ -24,7 +24,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Respon
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
-from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from itsdangerous import BadData, URLSafeTimedSerializer
 
 try:
     from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
@@ -201,36 +201,139 @@ for directory in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
 stripe.api_key = STRIPE_SECRET_KEY
+if STRIPE_SECRET_KEY:
+    # Billing state is reconciled on request paths, so bound the time a Stripe
+    # call may hold a worker thread when Stripe (or the network) is unhealthy.
+    try:
+        stripe.default_http_client = stripe.new_default_http_client(timeout=(5, 20))
+        stripe.max_network_retries = 1
+    except Exception:  # pragma: no cover - only if the SDK layout changes
+        logger.warning("Could not bound the Stripe HTTP client timeout", exc_info=True)
 signer = URLSafeTimedSerializer(APP_SESSION_SECRET, salt="duckit-identity-v1")
 
 
-def has_active_stripe_subscription(
-    customer_id: str | None = None, email: str | None = None
-) -> tuple[bool, str | None, str | None]:
-    """Return (is_pro, matched_customer_id, subscription_id) from Stripe."""
-    if not STRIPE_SECRET_KEY:
-        return False, customer_id, None
+def is_identity_id(value: Any) -> bool:
+    """Duck It identity IDs are 32-character lowercase hex UUIDs."""
+    return isinstance(value, str) and len(value) == 32 and all(char in "0123456789abcdef" for char in value)
 
+
+def stripe_search_escape(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+class StripeSubscriptionLookup(NamedTuple):
+    checked: bool
+    subscription: Any | None
+    customer_id: str | None
+
+
+STRIPE_PRO_STATUSES = frozenset({"active", "trialing"})
+STRIPE_STATUS_RANK = {"active": 0, "trialing": 1}
+
+
+def subscription_sort_key(subscription: Any, identity_id: str) -> tuple:
+    """Rank subscriptions so repeated lookups always pick the same one."""
+    metadata = subscription.get("metadata") or {}
+    status = subscription.get("status")
     try:
-        if customer_id:
-            subs = stripe.Subscription.list(
-                customer=customer_id, status="active", limit=1
+        created = int(subscription.get("created") or 0)
+    except (TypeError, ValueError):
+        created = 0
+    owns_identity = metadata.get("duckit_identity_id") == identity_id
+    return (
+        0 if status in STRIPE_PRO_STATUSES else 1,
+        STRIPE_STATUS_RANK.get(status, 2),
+        0 if owns_identity else 1,
+        -created,
+        stripe_id(subscription) or "",
+    )
+
+
+def list_customer_subscriptions(customer_id: str) -> list[Any]:
+    result = stripe.Subscription.list(customer=customer_id, status="all", limit=100)
+    return list(result.data)
+
+
+def find_stripe_subscription(
+    identity_id: str,
+    customer_id: str | None = None,
+    email: str | None = None,
+) -> StripeSubscriptionLookup:
+    """Find the Stripe subscription that belongs to this Duck It identity.
+
+    ``checked`` is False when Stripe could not be queried, which lets callers keep
+    the locally stored entitlement instead of downgrading on a transient failure.
+    """
+    if not STRIPE_SECRET_KEY:
+        return StripeSubscriptionLookup(False, None, customer_id)
+
+    checked = False
+    scanned: list[str] = []
+    candidates: dict[str, Any] = {}
+
+    def scan(customer: str) -> None:
+        nonlocal checked
+        if customer in scanned:
+            checked = True
+            return
+        for subscription in list_customer_subscriptions(customer):
+            candidates[stripe_id(subscription) or ""] = subscription
+        scanned.append(customer)
+        checked = True
+
+    if customer_id:
+        try:
+            scan(customer_id)
+        except Exception:
+            logger.warning(
+                "Stripe subscription lookup failed for customer %s", customer_id, exc_info=True
             )
-            if subs.data:
-                return True, customer_id, subs.data[0].id
 
-        if email:
-            customers = stripe.Customer.list(email=email, limit=5)
-            for cust in customers.data:
-                subs = stripe.Subscription.list(
-                    customer=cust.id, status="active", limit=1
+    if email:
+        try:
+            customers = stripe.Customer.list(email=email, limit=10)
+        except Exception:
+            logger.warning("Stripe customer lookup failed for a stored email", exc_info=True)
+            customers = None
+        for customer in getattr(customers, "data", None) or []:
+            found = stripe_id(customer)
+            if not found or found in scanned:
+                continue
+            try:
+                scan(found)
+            except Exception:
+                logger.warning(
+                    "Stripe subscription lookup failed for customer %s", found, exc_info=True
                 )
-                if subs.data:
-                    return True, cust.id, subs.data[0].id
-    except Exception:
-        logger.exception("Failed to check active Stripe subscription")
 
-    return False, customer_id, None
+    candidates.pop("", None)
+    if not candidates and is_identity_id(identity_id):
+        # Checkout stores the Duck It identity in Stripe metadata. It is the only
+        # handle left when the SQLite row was wiped and the cookie carries just
+        # an identity ID.
+        query = "metadata['duckit_identity_id']:'" + stripe_search_escape(identity_id) + "'"
+        try:
+            found = stripe.Subscription.search(query=query, limit=100)
+            checked = True
+            for subscription in found.data:
+                candidates[stripe_id(subscription) or ""] = subscription
+        except Exception:
+            logger.warning(
+                "Stripe subscription search by metadata failed for identity %s",
+                identity_id,
+                exc_info=True,
+            )
+
+    candidates.pop("", None)
+    if not candidates:
+        return StripeSubscriptionLookup(checked, None, customer_id)
+
+    ordered = sorted(
+        candidates.values(),
+        key=lambda subscription: subscription_sort_key(subscription, identity_id),
+    )
+    best = ordered[0]
+    return StripeSubscriptionLookup(checked, best, stripe_id(best.get("customer")) or customer_id)
 
 
 def load_cookie_payload(request: Request) -> dict[str, Any]:
@@ -239,7 +342,11 @@ def load_cookie_payload(request: Request) -> dict[str, Any]:
         return {}
     try:
         data = signer.loads(raw, max_age=COOKIE_MAX_AGE)
-    except (BadSignature, SignatureExpired):
+    except BadData:
+        # Expired, rotated or tampered cookies just get replaced by a fresh identity.
+        return {}
+    except Exception:
+        logger.warning("Could not verify the %s cookie", COOKIE_NAME, exc_info=True)
         return {}
     if isinstance(data, dict):
         return data
@@ -342,6 +449,14 @@ async def lifespan(app: FastAPI):
     global processing_semaphore, job_queue_depth
     processing_semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     job_queue_depth = 0
+    init_db()
+    logger.info("Duck It state is stored in %s", DB_PATH)
+    if settings.environment == "production" and not os.environ.get("DUCKIT_DATA_DIR"):
+        logger.warning(
+            "DUCKIT_DATA_DIR is not set, so SQLite lives on the instance filesystem and is "
+            "wiped on every Render deploy. Mount a persistent disk and set DUCKIT_DATA_DIR "
+            "to its mount path; Pro state is otherwise rebuilt from Stripe on each deploy."
+        )
     load_vad_model_safely()
     if not FFMPEG_AVAILABLE:
         logger.error("FFmpeg executable was not found on PATH")
@@ -493,21 +608,109 @@ def user_row(identity_id: str):
         ).fetchone()
 
 
+def link_billing_ids(
+    conn: sqlite3.Connection,
+    identity_id: str,
+    customer_id: str | None = None,
+    subscription_id: str | None = None,
+) -> None:
+    """Attach Stripe IDs to an identity without tripping the UNIQUE constraints.
+
+    A Stripe customer or subscription may only be stored on one row. When another
+    row already holds the value, the owner keeps it instead of raising
+    ``sqlite3.IntegrityError`` and turning a billing check into a 500.
+    """
+    if subscription_id:
+        conn.execute(
+            "UPDATE identities SET subscription_id = NULL, subscription_status = 'none' "
+            "WHERE subscription_id = ? AND id <> ?",
+            (subscription_id, identity_id),
+        )
+    if customer_id:
+        owner = conn.execute(
+            "SELECT id FROM identities WHERE stripe_customer_id = ? AND id <> ?",
+            (customer_id, identity_id),
+        ).fetchone()
+        if owner is not None:
+            logger.warning(
+                "Stripe customer %s is already linked to identity %s; keeping the existing link",
+                customer_id,
+                owner["id"],
+            )
+            customer_id = None
+    conn.execute(
+        """
+        UPDATE identities
+        SET stripe_customer_id = COALESCE(?, stripe_customer_id),
+            subscription_id = COALESCE(?, subscription_id)
+        WHERE id = ?
+        """,
+        (customer_id, subscription_id, identity_id),
+    )
+
+
 def ensure_identity_row(identity_id: str, customer_id: str | None = None) -> None:
     with db() as conn:
         conn.execute(
             """
             INSERT INTO identities (id, stripe_customer_id, free_exports_used, created_at)
-            VALUES (?, ?, 0, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                stripe_customer_id = COALESCE(excluded.stripe_customer_id, identities.stripe_customer_id)
+            VALUES (?, NULL, 0, ?)
+            ON CONFLICT(id) DO NOTHING
             """,
-            (identity_id, customer_id, int(time.time())),
+            (identity_id, int(time.time())),
         )
+        if customer_id:
+            link_billing_ids(conn, identity_id, customer_id=customer_id)
 
 
 def is_pro(user) -> bool:
-    return bool(user and user["subscription_status"] in {"active", "trialing"})
+    return bool(user and user["subscription_status"] in STRIPE_PRO_STATUSES)
+
+
+def identity_is_fresh(user) -> bool:
+    """True for a row without billing history that was created in the last day."""
+    if user is None:
+        return False
+    try:
+        created_at = int(user["created_at"] or 0)
+    except (TypeError, ValueError):
+        return False
+    return (
+        user["subscription_status"] == "none"
+        and user["subscription_id"] is None
+        and created_at >= int(time.time()) - 24 * 60 * 60
+    )
+
+
+def apply_stripe_lookup(identity_id: str, lookup: StripeSubscriptionLookup) -> dict[str, Any]:
+    """Persist a Stripe lookup and return the resulting local entitlement."""
+    subscription = lookup.subscription
+    if subscription is not None:
+        try:
+            save_subscription(subscription, identity_id)
+        except Exception:
+            logger.exception("Could not persist the Stripe subscription for identity %s", identity_id)
+    elif lookup.checked:
+        # Stripe answered and this identity has no subscription: drop a stale
+        # status, but never touch a row that still remembers a subscription ID
+        # (sync_pro_status_from_stripe verifies that ID separately).
+        with db() as conn:
+            conn.execute(
+                "UPDATE identities SET subscription_status = 'none' "
+                "WHERE id = ? AND subscription_id IS NULL AND subscription_status <> 'none'",
+                (identity_id,),
+            )
+
+    row = user_row(identity_id)
+    return {
+        "identity_id": identity_id,
+        "stripe_customer_id": (row["stripe_customer_id"] if row else None) or lookup.customer_id,
+        "subscription_id": (row["subscription_id"] if row else None)
+        or (stripe_id(subscription) if subscription is not None else None),
+        "subscription_status": (row["subscription_status"] if row else "none"),
+        "is_pro": is_pro(row),
+        "checked": lookup.checked,
+    }
 
 
 def sync_pro_status_from_stripe(
@@ -516,54 +719,87 @@ def sync_pro_status_from_stripe(
     email: str | None = None,
 ) -> dict[str, Any]:
     ensure_identity_row(identity_id, customer_id=customer_id)
-    pro_active, matched_customer_id, subscription_id = has_active_stripe_subscription(
-        customer_id=customer_id,
-        email=email,
-    )
-    status = "active" if pro_active else "none"
+    lookup = find_stripe_subscription(identity_id, customer_id=customer_id, email=email)
 
-    with db() as conn:
-        conn.execute(
-            """
-            UPDATE identities
-            SET stripe_customer_id = COALESCE(?, stripe_customer_id),
-                subscription_id = COALESCE(?, subscription_id),
-                subscription_status = CASE
-                    WHEN ? = 'active' THEN 'active'
-                    ELSE subscription_status
-                END
-            WHERE id = ?
-            """,
-            (matched_customer_id, subscription_id, status, identity_id),
-        )
+    if lookup.subscription is None and lookup.checked:
+        # The lookup found nothing; verify the remembered subscription directly so
+        # a canceled plan cannot keep Pro forever.
+        row = user_row(identity_id)
+        remembered = row["subscription_id"] if row else None
+        if remembered:
+            try:
+                lookup = StripeSubscriptionLookup(
+                    True, stripe.Subscription.retrieve(remembered), lookup.customer_id
+                )
+            except Exception:
+                logger.warning(
+                    "Could not retrieve subscription %s for identity %s",
+                    remembered,
+                    identity_id,
+                    exc_info=True,
+                )
+                lookup = StripeSubscriptionLookup(False, None, lookup.customer_id)
 
-    row = user_row(identity_id)
-    effective_pro = is_pro(row) or pro_active
-    return {
-        "identity_id": identity_id,
-        "stripe_customer_id": (row["stripe_customer_id"] if row else None) or matched_customer_id,
-        "subscription_id": (row["subscription_id"] if row else None) or subscription_id,
-        "subscription_status": "active" if effective_pro else (row["subscription_status"] if row else "none"),
-        "is_pro": effective_pro,
-    }
+    return apply_stripe_lookup(identity_id, lookup)
+
+
+def rehydrate_identity_billing(
+    identity_id: str,
+    customer_id: str | None = None,
+    email: str | None = None,
+) -> dict[str, Any]:
+    """Best-effort restoration of Stripe state for a locally unknown identity."""
+    if not STRIPE_SECRET_KEY:
+        row = user_row(identity_id)
+        return {
+            "identity_id": identity_id,
+            "stripe_customer_id": (row["stripe_customer_id"] if row else None) or customer_id,
+            "subscription_id": row["subscription_id"] if row else None,
+            "subscription_status": row["subscription_status"] if row else "none",
+            "is_pro": is_pro(row),
+            "checked": False,
+        }
+    try:
+        return sync_pro_status_from_stripe(identity_id, customer_id=customer_id, email=email)
+    except Exception:
+        logger.exception("Could not rehydrate billing state for identity %s", identity_id)
+        row = user_row(identity_id)
+        return {
+            "identity_id": identity_id,
+            "stripe_customer_id": (row["stripe_customer_id"] if row else None) or customer_id,
+            "subscription_id": row["subscription_id"] if row else None,
+            "subscription_status": row["subscription_status"] if row else "none",
+            "is_pro": is_pro(row),
+            "checked": False,
+        }
 
 
 def current_identity(request: Request, response: Response) -> str:
     payload = load_cookie_payload(request)
     candidate = payload.get("id")
-    customer_id = payload.get("customer_id")
-    email = payload.get("email")
+    customer_id = payload.get("customer_id") if isinstance(payload.get("customer_id"), str) else None
+    email = payload.get("email") if isinstance(payload.get("email"), str) else None
 
-    if isinstance(candidate, str) and candidate:
+    if is_identity_id(candidate):
         identity_id = candidate
         if not user_row(identity_id):
-            ensure_identity_row(identity_id, customer_id=customer_id if isinstance(customer_id, str) else None)
-            if customer_id or email:
-                sync_pro_status_from_stripe(
-                    identity_id,
-                    customer_id=customer_id if isinstance(customer_id, str) else None,
-                    email=email if isinstance(email, str) else None,
-                )
+            # Render replaces the filesystem on deploy, so the signed cookie can
+            # outlive the SQLite row that carried the Stripe handles. Rebuild the
+            # row and look the payer up through the identity Stripe metadata.
+            ensure_identity_row(identity_id, customer_id=customer_id)
+            mark_recovery_pending(identity_id)
+            if should_attempt_recovery(identity_id):
+                synced = rehydrate_identity_billing(identity_id, customer_id=customer_id, email=email)
+                finish_recovery(identity_id, bool(synced.get("checked")))
+                if synced.get("stripe_customer_id"):
+                    save_cookie_payload(
+                        response,
+                        {
+                            "id": identity_id,
+                            "customer_id": synced["stripe_customer_id"],
+                            **({"email": email} if email else {}),
+                        },
+                    )
     else:
         identity_id = uuid.uuid4().hex
         ensure_identity_row(identity_id)
@@ -587,6 +823,15 @@ def entitlement_payload(identity_id: str) -> dict[str, Any]:
         "exports_remaining": max(0, MAX_FREE_EXPORTS - used),
         "subscription_status": user["subscription_status"] if user else "none",
     }
+
+
+def status_payload(identity_id: str) -> dict[str, Any]:
+    """Entitlement plus the reconcile flags every /api/billing/status reply carries."""
+    payload = entitlement_payload(identity_id)
+    payload["pending_checkout"] = False
+    payload["reconciling"] = False
+    payload["retry_after_ms"] = 0
+    return payload
 
 
 def feature_flags_for(identity_id: str) -> dict[str, Any]:
@@ -659,6 +904,66 @@ def should_reconcile(identity_id: str) -> bool:
             cutoff = now - RECONCILE_INTERVAL_SECONDS
             for key in [key for key, stamp in reconcile_attempts.items() if stamp < cutoff]:
                 reconcile_attempts.pop(key, None)
+        return True
+
+
+RECOVERY_INTERVAL_SECONDS = 120.0
+RECOVERY_PENDING_TTL_SECONDS = 24 * 60 * 60
+PRO_REVALIDATE_SECONDS = 10 * 60
+recovery_lock = threading.Lock()
+recovery_pending: dict[str, float] = {}
+recovery_attempts: dict[str, float] = {}
+revalidate_lock = threading.Lock()
+revalidated_at: dict[str, float] = {}
+
+
+def _prune_clock(clock: dict[str, float], cutoff: float) -> None:
+    if len(clock) <= 10_000:
+        return
+    for key in [key for key, stamp in clock.items() if stamp < cutoff]:
+        clock.pop(key, None)
+
+
+def mark_recovery_pending(identity_id: str) -> None:
+    """Remember that an identity lost its row and may need a Stripe lookup."""
+    now = time.monotonic()
+    with recovery_lock:
+        recovery_pending[identity_id] = now + RECOVERY_PENDING_TTL_SECONDS
+        _prune_clock(recovery_pending, now)
+
+
+def should_attempt_recovery(identity_id: str) -> bool:
+    now = time.monotonic()
+    with recovery_lock:
+        deadline = recovery_pending.get(identity_id)
+        if deadline is None or deadline <= now:
+            recovery_pending.pop(identity_id, None)
+            return False
+        last = recovery_attempts.get(identity_id, 0.0)
+        if now - last < RECOVERY_INTERVAL_SECONDS:
+            return False
+        recovery_attempts[identity_id] = now
+        _prune_clock(recovery_attempts, now - RECOVERY_INTERVAL_SECONDS)
+        return True
+
+
+def finish_recovery(identity_id: str, checked: bool) -> None:
+    with recovery_lock:
+        if checked:
+            recovery_attempts.pop(identity_id, None)
+            recovery_pending.pop(identity_id, None)
+        # An unchecked attempt keeps its timestamp so a Stripe outage is retried
+        # on the next RECOVERY_INTERVAL_SECONDS window, not on every request.
+
+
+def should_revalidate_pro(identity_id: str) -> bool:
+    now = time.monotonic()
+    with revalidate_lock:
+        last = revalidated_at.get(identity_id, 0.0)
+        if now - last < PRO_REVALIDATE_SECONDS:
+            return False
+        revalidated_at[identity_id] = now
+        _prune_clock(revalidated_at, now - PRO_REVALIDATE_SECONDS)
         return True
 
 
@@ -1329,6 +1634,28 @@ def health_check():
     }
 
 
+def revalidate_pro_entitlement(
+    identity_id: str,
+    payload: dict[str, Any],
+    customer_id: str | None,
+    email: str | None,
+) -> dict[str, Any]:
+    """Refresh a cached Pro entitlement occasionally so lapses are noticed."""
+    if not should_revalidate_pro(identity_id):
+        return payload
+    user = user_row(identity_id)
+    lookup_customer = (user["stripe_customer_id"] if user else None) or customer_id
+    if not lookup_customer and not (user and user["subscription_id"]):
+        return payload
+    snapshot = rehydrate_identity_billing(identity_id, customer_id=lookup_customer, email=email)
+    if not snapshot.get("checked"):
+        # Stripe could not answer: keep the locally stored entitlement.
+        return payload
+    refreshed = status_payload(identity_id)
+    refreshed["pending_checkout"] = payload["pending_checkout"]
+    return refreshed
+
+
 @app.get("/api/billing/status")
 def billing_status(
     request: Request,
@@ -1336,36 +1663,60 @@ def billing_status(
     session_id: str | None = None,
     identity_id: str = Depends(current_identity),
 ):
-    payload = entitlement_payload(identity_id)
-    payload["pending_checkout"] = False
-    payload["reconciling"] = False
-    payload["retry_after_ms"] = 0
+    payload = status_payload(identity_id)
 
     cookie_data = load_cookie_payload(request)
     cookie_customer_id = cookie_data.get("customer_id") if isinstance(cookie_data.get("customer_id"), str) else None
     cookie_email = cookie_data.get("email") if isinstance(cookie_data.get("email"), str) else None
 
-    if payload["pro"] or not STRIPE_SECRET_KEY:
+    if not STRIPE_SECRET_KEY:
         return payload
 
     if session_id and not session_id.startswith("cs_"):
         session_id = None
-    candidate = latest_pending_checkout(identity_id, session_id)
-    user = user_row(identity_id)
-    subscription_id = user["subscription_id"] if user else None
-    customer_id = (user["stripe_customer_id"] if user else None) or cookie_customer_id
-    payload["pending_checkout"] = candidate is not None
 
-    if (candidate or subscription_id or customer_id or cookie_email) and should_reconcile(identity_id):
-        payload["reconciling"] = True
-        reconciled = False
-        if candidate:
-            reconciled = reconcile_checkout_session(candidate, identity_id)
-        if not reconciled and subscription_id:
-            reconciled = reconcile_subscription(identity_id, subscription_id)
-        if not reconciled and (customer_id or cookie_email):
-            synced = sync_pro_status_from_stripe(identity_id, customer_id=customer_id, email=cookie_email)
-            reconciled = bool(synced.get("is_pro"))
+    if payload["pro"]:
+        return revalidate_pro_entitlement(identity_id, payload, cookie_customer_id, cookie_email)
+
+    try:
+        candidate = latest_pending_checkout(identity_id, session_id)
+        user = user_row(identity_id)
+        subscription_id = user["subscription_id"] if user else None
+        customer_id = (user["stripe_customer_id"] if user else None) or cookie_customer_id
+        payload["pending_checkout"] = candidate is not None
+        has_billing_handle = bool(candidate or subscription_id or customer_id or cookie_email)
+
+        if has_billing_handle and should_reconcile(identity_id):
+            payload["reconciling"] = True
+            reconciled = False
+            if candidate:
+                reconciled = reconcile_checkout_session(candidate, identity_id)
+            if not reconciled and subscription_id:
+                reconciled = reconcile_subscription(identity_id, subscription_id)
+            if not reconciled and (customer_id or cookie_email):
+                synced = sync_pro_status_from_stripe(
+                    identity_id, customer_id=customer_id, email=cookie_email
+                )
+                reconciled = bool(synced.get("is_pro"))
+                if synced.get("stripe_customer_id"):
+                    save_cookie_payload(
+                        response,
+                        {
+                            "id": identity_id,
+                            "customer_id": synced["stripe_customer_id"],
+                            **({"email": cookie_email} if cookie_email else {}),
+                        },
+                    )
+            if reconciled:
+                return status_payload(identity_id)
+            payload["pending_checkout"] = latest_pending_checkout(identity_id) is not None
+        elif not has_billing_handle and should_attempt_recovery(identity_id):
+            # The SQLite row was rebuilt after a deploy but has no Stripe handle:
+            # look the payer up through the identity metadata saved at checkout.
+            synced = rehydrate_identity_billing(identity_id)
+            finish_recovery(identity_id, bool(synced.get("checked")))
+            if synced.get("is_pro"):
+                return status_payload(identity_id)
             if synced.get("stripe_customer_id"):
                 save_cookie_payload(
                     response,
@@ -1375,9 +1726,9 @@ def billing_status(
                         **({"email": cookie_email} if cookie_email else {}),
                     },
                 )
-        if reconciled:
-            return entitlement_payload(identity_id)
-        payload["pending_checkout"] = latest_pending_checkout(identity_id) is not None
+    except Exception:
+        logger.exception("Could not reconcile billing state for identity %s", identity_id)
+        payload["reconciling"] = False
 
     if payload["pending_checkout"] or payload["reconciling"]:
         payload["retry_after_ms"] = int(RECONCILE_INTERVAL_SECONDS * 1000)
@@ -1431,9 +1782,19 @@ def verify_checkout_session(
 
     user = user_row(identity_id)
     expected_customer = user["stripe_customer_id"] if user else None
+    session_metadata = session.get("metadata") or {}
+    session_identity = session.get("client_reference_id") or session_metadata.get("duckit_identity_id")
+    target_identity = identity_id
+    if session_identity != identity_id:
+        # A redeploy (or a cleared cookie) can mint a fresh identity between
+        # Checkout and the redirect. Adopt the paying identity only when this
+        # browser has no billing or export history of its own.
+        if is_identity_id(session_identity) and identity_is_fresh(user):
+            target_identity = session_identity
+        else:
+            raise HTTPException(status_code=403, detail="That Checkout session does not belong to this browser.")
     if (
         session.get("mode") != "subscription"
-        or session.get("client_reference_id") != identity_id
         or (expected_customer and stripe_id(session.get("customer")) != expected_customer)
     ):
         raise HTTPException(status_code=403, detail="That Checkout session does not belong to this browser.")
@@ -1449,7 +1810,7 @@ def verify_checkout_session(
         except Exception as exc:
             raise stripe_error("subscription activation", exc) from exc
     try:
-        save_subscription(subscription, identity_id)
+        save_subscription(subscription, target_identity)
     except (sqlite3.Error, ValueError) as exc:
         logger.exception("Could not persist verified Stripe subscription")
         raise HTTPException(
@@ -1462,24 +1823,26 @@ def verify_checkout_session(
 
     customer_id = stripe_id(session.get("customer")) or (user["stripe_customer_id"] if user else None)
     customer_email = (session.get("customer_details") or {}).get("email") or session.get("customer_email")
-    cookie_payload: dict[str, Any] = {"id": identity_id}
+    cookie_payload: dict[str, Any] = {"id": target_identity}
     if customer_id:
         cookie_payload["customer_id"] = customer_id
     if customer_email:
         cookie_payload["email"] = customer_email
     save_cookie_payload(response, cookie_payload)
+    if target_identity != identity_id:
+        finish_recovery(target_identity, True)
 
     set_checkout_session_status(session_id, "complete")
     if posthog_client:
         posthog_client.capture(
             "subscription_activated",
-            distinct_id=identity_id,
+            distinct_id=target_identity,
             properties={
                 "plan": "pro",
                 "activation_source": "checkout_verification",
             },
         )
-    return entitlement_payload(identity_id)
+    return entitlement_payload(target_identity)
 
 
 @app.post("/api/billing/checkout")
@@ -1503,11 +1866,7 @@ def create_checkout(response: Response, identity_id: str = Depends(current_ident
         except Exception as exc:
             raise stripe_error("customer setup", exc) from exc
         customer_id = customer.id
-        with db() as conn:
-            conn.execute(
-                "UPDATE identities SET stripe_customer_id = ? WHERE id = ?",
-                (customer_id, identity_id),
-            )
+        ensure_identity_row(identity_id, customer_id=customer_id)
 
     save_cookie_payload(response, {"id": identity_id, "customer_id": customer_id})
 
@@ -1539,9 +1898,31 @@ def create_checkout(response: Response, identity_id: str = Depends(current_ident
 
 
 @app.post("/api/billing/portal")
-def create_billing_portal(identity_id: str = Depends(current_identity)):
+def create_billing_portal(
+    request: Request,
+    response: Response,
+    identity_id: str = Depends(current_identity),
+):
     require_billing_config()
     user = user_row(identity_id)
+    cookie_data = load_cookie_payload(request)
+    cookie_customer_id = cookie_data.get("customer_id") if isinstance(cookie_data.get("customer_id"), str) else None
+    cookie_email = cookie_data.get("email") if isinstance(cookie_data.get("email"), str) else None
+    if not user or not user["stripe_customer_id"]:
+        # A deploy may have recreated this row; find the Stripe customer again.
+        synced = rehydrate_identity_billing(
+            identity_id, customer_id=cookie_customer_id, email=cookie_email
+        )
+        user = user_row(identity_id)
+        if synced.get("stripe_customer_id"):
+            save_cookie_payload(
+                response,
+                {
+                    "id": identity_id,
+                    "customer_id": synced["stripe_customer_id"],
+                    **({"email": cookie_email} if cookie_email else {}),
+                },
+            )
     if not user or not user["stripe_customer_id"]:
         raise HTTPException(status_code=404, detail="No billing account exists yet.")
 
@@ -1803,9 +2184,25 @@ def download_job(job_id: str, response: Response, identity_id: str = Depends(cur
     return FileResponse(job["output_path"], media_type="audio/mpeg", filename=job["filename"])
 
 
+def identity_id_from_customer(customer_id: str | None) -> str | None:
+    """Read the Duck It identity that Checkout stored on the Stripe customer."""
+    if not customer_id or not STRIPE_SECRET_KEY:
+        return None
+    try:
+        customer = stripe.Customer.retrieve(customer_id)
+    except Exception:
+        logger.warning("Could not retrieve Stripe customer %s", customer_id, exc_info=True)
+        return None
+    metadata = customer.get("metadata") or {}
+    candidate = metadata.get("duckit_identity_id")
+    return candidate if is_identity_id(candidate) else None
+
+
 def save_subscription(subscription, identity_hint=None):
     metadata = subscription.get("metadata", {}) or {}
-    identity_id = identity_hint or metadata.get("duckit_identity_id")
+    identity_id = identity_hint if is_identity_id(identity_hint) else metadata.get("duckit_identity_id")
+    if not is_identity_id(identity_id):
+        identity_id = None
     customer_id = stripe_id(subscription.get("customer"))
     subscription_id = stripe_id(subscription)
     status = subscription.get("status", "none")
@@ -1813,30 +2210,43 @@ def save_subscription(subscription, identity_hint=None):
         raise ValueError("Stripe returned a subscription without an ID")
 
     with db() as conn:
-        if identity_id:
-            conn.execute(
-                """
-                INSERT INTO identities (
-                    id, stripe_customer_id, subscription_id, subscription_status, free_exports_used, created_at
-                )
-                VALUES (?, ?, ?, ?, 0, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    stripe_customer_id = COALESCE(excluded.stripe_customer_id, identities.stripe_customer_id),
-                    subscription_id = excluded.subscription_id,
-                    subscription_status = excluded.subscription_status
-                """,
-                (identity_id, customer_id, subscription_id, status, int(time.time())),
-            )
-        else:
-            conn.execute(
-                "UPDATE identities SET subscription_id = ?, subscription_status = ? WHERE stripe_customer_id = ? OR subscription_id = ?",
-                (subscription_id, status, customer_id, subscription_id),
-            )
+        if not identity_id:
             identity = conn.execute(
                 "SELECT id FROM identities WHERE stripe_customer_id = ? OR subscription_id = ?",
                 (customer_id, subscription_id),
             ).fetchone()
             identity_id = identity["id"] if identity else None
+
+    if not identity_id:
+        # Webhooks and invoice events arrive without an identity hint; the
+        # customer metadata is the last link back to the payer after a deploy.
+        identity_id = identity_id_from_customer(customer_id)
+    if not identity_id:
+        logger.warning("Stripe subscription %s is not linked to any Duck It identity", subscription_id)
+        return None
+
+    with db() as conn:
+        conn.execute(
+            """
+            INSERT INTO identities (
+                id, stripe_customer_id, subscription_id, subscription_status, free_exports_used, created_at
+            )
+            VALUES (?, NULL, NULL, 'none', 0, ?)
+            ON CONFLICT(id) DO NOTHING
+            """,
+            (identity_id, int(time.time())),
+        )
+        # A subscription belongs to exactly one row; move it if another row held it.
+        conn.execute(
+            "UPDATE identities SET subscription_id = NULL, subscription_status = 'none' "
+            "WHERE subscription_id = ? AND id <> ?",
+            (subscription_id, identity_id),
+        )
+        conn.execute(
+            "UPDATE identities SET subscription_id = ?, subscription_status = ? WHERE id = ?",
+            (subscription_id, status, identity_id),
+        )
+        link_billing_ids(conn, identity_id, customer_id=customer_id)
     return identity_id
 
 
