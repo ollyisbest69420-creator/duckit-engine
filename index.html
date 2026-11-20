@@ -1558,6 +1558,9 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
+                        if (response.status === 404 && (!data.detail || data.detail === 'Not Found')) {
+                            throw new Error('Restore endpoint (/api/billing/restore) returned 404 Not Found — make sure the updated server.py is deployed.');
+                        }
                         throw new Error(formatDetail(data.detail));
                     }
                     billing = data;

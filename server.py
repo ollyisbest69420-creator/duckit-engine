@@ -234,8 +234,10 @@ def extract_email(obj: Any) -> str | None:
     if obj is None or not hasattr(obj, "get"):
         return None
     details = obj.get("customer_details")
-    if hasattr(details, "get") and details.get("email"):
-        return normalize_email(details.get("email"))
+    if hasattr(details, "get"):
+        detail_email = normalize_email(details.get("email"))
+        if detail_email:
+            return detail_email
     return normalize_email(obj.get("customer_email") or obj.get("email"))
 
 
@@ -260,6 +262,22 @@ def checkout_session_matches_key(session_id: str) -> bool:
 
 def stripe_search_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _iter_stripe_list(result: Any, limit_items: int | None = None) -> list[Any]:
+    items: list[Any] = []
+    if result is None:
+        return items
+    iterator = (
+        result.auto_paging_iter()
+        if hasattr(result, "auto_paging_iter")
+        else (getattr(result, "data", None) or [])
+    )
+    for item in iterator:
+        items.append(item)
+        if limit_items is not None and len(items) >= limit_items:
+            break
+    return items
 
 
 class StripeSubscriptionLookup(NamedTuple):
@@ -293,7 +311,27 @@ def subscription_sort_key(subscription: Any, identity_id: str) -> tuple:
 
 def list_customer_subscriptions(customer_id: str) -> list[Any]:
     result = stripe.Subscription.list(customer=customer_id, status="all", limit=100)
-    return list(result.data)
+    return _iter_stripe_list(result, limit_items=200)
+
+
+def backfill_stripe_customer_email(
+    customer_id: str | None,
+    email: str | None,
+    customer_obj: Any = None,
+) -> None:
+    """Best-effort sync of Checkout email onto Stripe Customer so future email lookups hit directly."""
+    normalized = normalize_email(email)
+    if not STRIPE_SECRET_KEY or not customer_id or not normalized:
+        return
+    try:
+        existing_email = extract_email(customer_obj)
+        if not existing_email:
+            fetched = stripe.Customer.retrieve(customer_id)
+            existing_email = extract_email(fetched)
+        if not existing_email:
+            stripe.Customer.modify(customer_id, email=normalized)
+    except Exception:
+        logger.debug("Could not backfill Stripe customer email for %s", customer_id, exc_info=True)
 
 
 def find_stripe_subscription(
@@ -347,11 +385,49 @@ def find_stripe_subscription(
         if isinstance(email, str) and email.strip() and email.strip() != normalized_email:
             email_queries.append(email.strip())
 
+        def has_pro_candidate() -> bool:
+            return any(
+                hasattr(sub, "get") and sub.get("status") in STRIPE_PRO_STATUSES
+                for sub in candidates.values()
+            )
+
+        def record_checkout_session(sess: Any, fallback_email: str | None = None) -> None:
+            if not hasattr(sess, "get"):
+                return
+            sess_email = extract_email(sess) or normalize_email(fallback_email)
+            sess_customer = stripe_id(sess.get("customer"))
+            if sess_customer:
+                if sess_email:
+                    customer_emails.setdefault(sess_customer, sess_email)
+                if sess_customer not in scanned:
+                    try:
+                        scan(sess_customer)
+                    except Exception:
+                        logger.warning(
+                            "Stripe subscription lookup failed for customer %s", sess_customer, exc_info=True
+                        )
+            sess_sub = sess.get("subscription")
+            if isinstance(sess_sub, str):
+                if sess_sub and sess_sub not in candidates:
+                    try:
+                        sub_obj = stripe.Subscription.retrieve(sess_sub)
+                        sub_id = stripe_id(sub_obj)
+                        if sub_id and hasattr(sub_obj, "get"):
+                            candidates[sub_id] = sub_obj
+                    except Exception:
+                        logger.warning(
+                            "Stripe subscription retrieve failed for %s", sess_sub, exc_info=True
+                        )
+            elif hasattr(sess_sub, "get"):
+                sub_id = stripe_id(sess_sub)
+                if sub_id:
+                    candidates[sub_id] = sess_sub
+
         for query_email in email_queries:
             try:
                 listed = stripe.Customer.list(email=query_email, limit=100)
                 checked = True
-                for cust in getattr(listed, "data", None) or []:
+                for cust in _iter_stripe_list(listed, limit_items=100):
                     cid = stripe_id(cust)
                     if cid:
                         discovered_customers[cid] = cust
@@ -363,7 +439,7 @@ def find_stripe_subscription(
             search_query = "email:'" + stripe_search_escape(normalized_email) + "'"
             searched = stripe.Customer.search(query=search_query, limit=100)
             checked = True
-            for cust in getattr(searched, "data", None) or []:
+            for cust in _iter_stripe_list(searched, limit_items=100):
                 cid = stripe_id(cust)
                 if cid:
                     discovered_customers[cid] = cust
@@ -381,6 +457,78 @@ def find_stripe_subscription(
                     "Stripe subscription lookup failed for customer %s", found, exc_info=True
                 )
 
+        # create_checkout() creates Customers without an email, so Checkout
+        # frequently records the payer's email only on Session.customer_details.email
+        # or on the generated Invoice. Search Checkout Sessions directly if needed.
+        if not has_pro_candidate():
+            for query_email in email_queries:
+                try:
+                    sessions = stripe.checkout.Session.list(
+                        customer_details={"email": query_email},
+                        limit=100,
+                    )
+                    checked = True
+                    for sess in _iter_stripe_list(sessions, limit_items=100):
+                        record_checkout_session(sess, fallback_email=normalized_email)
+                except Exception:
+                    logger.debug(
+                        "Stripe checkout session list by customer_details failed", exc_info=True
+                    )
+
+        # Case-insensitive fallback across active/trialing subscriptions (checks
+        # expanded Customer, latest Invoice, and metadata emails).
+        if not has_pro_candidate():
+            for pro_status in ("active", "trialing"):
+                try:
+                    subs = stripe.Subscription.list(
+                        status=pro_status,
+                        limit=100,
+                        expand=["data.customer", "data.latest_invoice"],
+                    )
+                    checked = True
+                    for sub in _iter_stripe_list(subs, limit_items=500):
+                        sub_id = stripe_id(sub)
+                        if not sub_id:
+                            continue
+                        cust_obj = sub.get("customer")
+                        inv_obj = sub.get("latest_invoice")
+                        sub_meta = sub.get("metadata") or {}
+                        cust_meta = (cust_obj.get("metadata") or {}) if hasattr(cust_obj, "get") else {}
+                        matched_email = (
+                            extract_email(sub)
+                            or extract_email(cust_obj)
+                            or extract_email(inv_obj)
+                            or normalize_email(sub_meta.get("email") or sub_meta.get("customer_email"))
+                            or normalize_email(cust_meta.get("email") or cust_meta.get("customer_email"))
+                        )
+                        if matched_email == normalized_email:
+                            candidates[sub_id] = sub
+                            cid = stripe_id(cust_obj)
+                            if cid:
+                                customer_emails[cid] = matched_email
+                except Exception:
+                    logger.warning(
+                        "Stripe %s subscription scan failed for email lookup", pro_status, exc_info=True
+                    )
+
+        # Final fallback: scan recent completed subscription Checkout Sessions
+        # case-insensitively in case Customer.email was null and Checkout used
+        # mixed-case casing.
+        if not has_pro_candidate():
+            try:
+                sessions = stripe.checkout.Session.list(status="complete", limit=100)
+                checked = True
+                for sess in _iter_stripe_list(sessions, limit_items=300):
+                    if sess.get("mode") != "subscription":
+                        continue
+                    if extract_email(sess) != normalized_email:
+                        continue
+                    record_checkout_session(sess, fallback_email=normalized_email)
+            except Exception:
+                logger.warning(
+                    "Stripe completed checkout session scan failed for email lookup", exc_info=True
+                )
+
     candidates.pop("", None)
     if not candidates and is_identity_id(identity_id):
         # Checkout stores the Duck It identity in Stripe metadata on both the
@@ -390,7 +538,7 @@ def find_stripe_subscription(
         try:
             found = stripe.Subscription.search(query=sub_query, limit=100)
             checked = True
-            for subscription in getattr(found, "data", None) or []:
+            for subscription in _iter_stripe_list(found, limit_items=100):
                 sub_id = stripe_id(subscription)
                 if sub_id:
                     candidates[sub_id] = subscription
@@ -405,7 +553,7 @@ def find_stripe_subscription(
             try:
                 cust_found = stripe.Customer.search(query=sub_query, limit=25)
                 checked = True
-                for cust in getattr(cust_found, "data", None) or []:
+                for cust in _iter_stripe_list(cust_found, limit_items=25):
                     cid = stripe_id(cust)
                     if not cid:
                         continue
@@ -436,6 +584,8 @@ def find_stripe_subscription(
     best_customer_id = stripe_id(best.get("customer")) or customer_id
     best_email = (
         (customer_emails.get(best_customer_id) if best_customer_id else None)
+        or extract_email(best.get("customer"))
+        or extract_email(best.get("latest_invoice"))
         or normalized_email
     )
     if not best_email and best_customer_id:
@@ -1321,6 +1471,7 @@ def reconcile_checkout_session(session_id: str, identity_id: str) -> bool:
     except Exception:
         logger.exception("Could not persist reconciled subscription for %s", identity_id)
         return False
+    backfill_stripe_customer_email(session_customer_id, session_email, session.get("customer"))
     set_checkout_session_status(session_id, "complete")
     return is_pro(user_row(identity_id))
 
@@ -1995,6 +2146,7 @@ def billing_status(
         if has_billing_handle and (session_id or should_reconcile(identity_id)):
             payload["reconciling"] = True
             reconciled = False
+            synced: dict[str, Any] = {}
             if candidate:
                 reconciled = reconcile_checkout_session(candidate, identity_id)
             if not reconciled and subscription_id:
@@ -2008,8 +2160,8 @@ def billing_status(
                 request,
                 response,
                 identity_id,
-                customer_id=customer_id,
-                email=effective_email,
+                customer_id=synced.get("stripe_customer_id") or customer_id,
+                email=synced.get("customer_email") or effective_email,
             )
             if reconciled:
                 return status_payload(identity_id)
@@ -2136,6 +2288,7 @@ def verify_checkout_session(
         ) from exc
 
     customer_id = stripe_id(session.get("customer")) or (user["stripe_customer_id"] if user else None)
+    backfill_stripe_customer_email(customer_id, customer_email, session.get("customer"))
     sync_identity_cookie(
         request,
         response,
@@ -2161,6 +2314,7 @@ def verify_checkout_session(
 
 
 @app.post("/api/billing/restore")
+@app.post("/api/billing/restore/", include_in_schema=False)
 async def restore_billing_by_email(
     request: Request,
     response: Response,
@@ -2170,19 +2324,33 @@ async def restore_billing_by_email(
 
     raw_email: Any = None
     content_type = (request.headers.get("content-type") or "").lower()
-    if "application/json" in content_type:
-        try:
-            body = await request.json()
-            if isinstance(body, dict):
-                raw_email = body.get("email")
-        except Exception:
-            raw_email = None
-    else:
+    if "application/x-www-form-urlencoded" in content_type or "multipart/form-data" in content_type:
         try:
             form = await request.form()
             raw_email = form.get("email")
         except Exception:
             raw_email = None
+    else:
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                body = json.loads(raw_body.decode("utf-8"))
+                if isinstance(body, dict):
+                    raw_email = body.get("email")
+            except Exception:
+                raw_email = None
+            if raw_email is None:
+                try:
+                    from urllib.parse import parse_qs
+
+                    parsed = parse_qs(raw_body.decode("utf-8", errors="ignore"))
+                    values = parsed.get("email")
+                    if values:
+                        raw_email = values[0]
+                except Exception:
+                    raw_email = None
+    if raw_email is None:
+        raw_email = request.query_params.get("email")
 
     email = normalize_email(raw_email)
     if not email:
@@ -2212,18 +2380,31 @@ async def restore_billing_by_email(
         )
 
     subscription = lookup.subscription
-    if subscription is None or subscription.get("status") not in STRIPE_PRO_STATUSES:
+    found_status = subscription.get("status") if subscription is not None else None
+    if subscription is None or found_status not in STRIPE_PRO_STATUSES:
+        logger.warning(
+            "Billing restore found no active subscription for identity %s (stripe_mode=%s, latest_status=%s)",
+            identity_id,
+            stripe_key_mode() or "unknown",
+            found_status,
+        )
+        message = (
+            f"No active Pro subscription was found for that email address (latest status: {found_status})."
+            if found_status
+            else "No active Pro subscription was found for that email address."
+        )
         raise HTTPException(
             status_code=404,
             detail={
                 "code": "subscription_not_found",
-                "message": "No active Pro subscription was found for that email address.",
+                "message": message,
             },
         )
 
     resolved_email = lookup.email or email
     resolved_customer = lookup.customer_id or stripe_id(subscription.get("customer"))
     await run_in_threadpool(save_subscription, subscription, identity_id, resolved_email)
+    await run_in_threadpool(backfill_stripe_customer_email, resolved_customer, resolved_email)
     sync_identity_cookie(
         request,
         response,
@@ -2760,6 +2941,11 @@ async def stripe_webhook(request: Request):
                 subscription = await run_in_threadpool(stripe.Subscription.retrieve, subscription_id)
                 await run_in_threadpool(
                     save_subscription, subscription, obj.get("client_reference_id"), session_email
+                )
+                await run_in_threadpool(
+                    backfill_stripe_customer_email,
+                    stripe_id(obj.get("customer")) or stripe_id(subscription.get("customer")),
+                    session_email,
                 )
             except Exception:
                 logger.exception("Could not apply Stripe checkout event %s", event["id"])
