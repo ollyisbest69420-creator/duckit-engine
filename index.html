@@ -283,6 +283,31 @@
         @keyframes draw-circle { to { stroke-dashoffset: 0; } }
         @keyframes draw-tick { to { stroke-dashoffset: 0; } }
 
+        .restore-trigger {
+            color: #7dd3fc;
+            font-weight: 500;
+            text-decoration: underline;
+            text-underline-offset: 3px;
+            transition: color 150ms ease;
+        }
+        .restore-trigger:hover { color: #bae6fd; }
+        .restore-input {
+            width: 100%;
+            border-radius: 0.75rem;
+            border: 1px solid rgba(255, 255, 255, 0.14);
+            background: rgba(9, 13, 22, 0.85);
+            padding: 0.7rem 0.9rem;
+            font-size: 0.875rem;
+            color: #f8fafc;
+            outline: none;
+            transition: border-color 150ms ease, box-shadow 150ms ease;
+        }
+        .restore-input::placeholder { color: #64748b; }
+        .restore-input:focus {
+            border-color: rgba(56, 189, 248, 0.8);
+            box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.18);
+        }
+
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after {
                 animation: none !important;
@@ -464,6 +489,10 @@
             <p id="planNote" class="mt-3 text-center text-[11px] text-slate-500">
                 3 free exports (up to 3 mins max per export). Upgrade to Pro for unlimited length & exports.
             </p>
+            <p id="restoreWrap" class="mt-2 text-center text-[11px] text-slate-400">
+                Already subscribed?
+                <button type="button" id="restoreOpenBtn" class="restore-trigger">Restore Pro by email</button>
+            </p>
             <p id="limitHint" class="mt-1 text-center font-mono text-[10px] uppercase tracking-[0.12em] text-slate-600">
                 MP4 · MOV · MP3 · WAV · M4A
             </p>
@@ -539,6 +568,44 @@
                     Upgrade to Pro
                 </button>
             </div>
+            <p class="mt-4 text-center text-xs text-slate-400">
+                Already Pro?
+                <button type="button" id="modalRestoreBtn" class="restore-trigger">Restore by email</button>
+            </p>
+        </div>
+    </div>
+
+    <!-- Restore Pro Modal -->
+    <div id="restoreModal" hidden class="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="restoreTitle">
+        <div class="panel w-full max-w-md rounded-2xl border border-white/15 p-6 shadow-2xl">
+            <div class="flex items-start justify-between gap-3">
+                <div class="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-sky-400/30 bg-sky-400/10 text-sky-300">
+                    <svg viewBox="0 0 24 24" class="h-5 w-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="2" y="4" width="20" height="16" rx="2"/>
+                        <path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/>
+                    </svg>
+                </div>
+                <button type="button" id="restoreCloseBtn" class="rounded-lg p-1.5 text-slate-400 transition hover:bg-white/10 hover:text-white" aria-label="Close restore modal">
+                    <i data-lucide="x" class="h-4 w-4"></i>
+                </button>
+            </div>
+            <h3 id="restoreTitle" class="mt-4 text-lg font-semibold text-white">Restore Pro subscription</h3>
+            <p class="mt-2 text-sm leading-relaxed text-slate-300">
+                Enter the billing email address used on your Stripe subscription to unlock Pro on this browser.
+            </p>
+            <form id="restoreForm" class="mt-4" novalidate>
+                <label for="restoreEmail" class="sr-only">Billing email address</label>
+                <input id="restoreEmail" class="restore-input" type="email" autocomplete="email" placeholder="you@example.com" required>
+                <p id="restoreError" hidden class="mt-2 text-xs text-rose-300"></p>
+                <div class="mt-5 flex flex-col gap-2.5 sm:flex-row">
+                    <button type="button" id="restoreCancelBtn" class="flex-1 rounded-xl border border-white/15 bg-white/[0.05] px-4 py-2.5 text-xs font-semibold text-white transition hover:bg-white/10">
+                        Cancel
+                    </button>
+                    <button type="submit" id="restoreSubmitBtn" class="flex-1 rounded-xl bg-gradient-to-r from-[#38bdf8] to-[#6366f1] px-4 py-2.5 text-xs font-semibold text-white shadow-[0_8px_24px_-8px_rgba(56,189,248,0.85)] transition hover:brightness-110">
+                        Restore Pro
+                    </button>
+                </div>
+            </form>
         </div>
     </div>
 
@@ -609,6 +676,16 @@
         const upgradeBtn = document.getElementById('upgradeBtn');
         const planBadge = document.getElementById('planBadge');
         const planNote = document.getElementById('planNote');
+        const restoreWrap = document.getElementById('restoreWrap');
+        const restoreOpenBtn = document.getElementById('restoreOpenBtn');
+        const modalRestoreBtn = document.getElementById('modalRestoreBtn');
+        const restoreModal = document.getElementById('restoreModal');
+        const restoreCloseBtn = document.getElementById('restoreCloseBtn');
+        const restoreCancelBtn = document.getElementById('restoreCancelBtn');
+        const restoreForm = document.getElementById('restoreForm');
+        const restoreEmail = document.getElementById('restoreEmail');
+        const restoreError = document.getElementById('restoreError');
+        const restoreSubmitBtn = document.getElementById('restoreSubmitBtn');
         const trialMeter = document.getElementById('trialMeter');
         const trialBar = document.getElementById('trialBar');
         const trialText = document.getElementById('trialText');
@@ -975,19 +1052,24 @@
                 planBadge.className = 'rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-emerald-200';
                 upgradeBtn.textContent = 'Manage plan';
                 planNote.textContent = proPlanCopy || 'Pro is active — unlimited exports and full-length tracks.';
+                if (restoreWrap) restoreWrap.hidden = true;
             } else {
                 const remaining = Math.max(0, maxFreeExports - exportsUsed);
                 planBadge.textContent = remaining + (remaining === 1 ? ' export remaining' : ' exports remaining');
                 planBadge.className = 'rounded-full border border-sky-400/25 bg-sky-400/10 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.12em] text-sky-200';
                 upgradeBtn.textContent = 'Upgrade to Pro';
                 planNote.textContent = freePlanCopy || defaultFreePlanCopy();
+                if (restoreWrap) restoreWrap.hidden = false;
             }
             renderTrialMeter();
         }
 
-        async function refreshBilling() {
+        async function refreshBilling(sessionId) {
             try {
-                const response = await fetch('/api/billing/status', { credentials: 'same-origin' });
+                const statusUrl = sessionId
+                    ? '/api/billing/status?session_id=' + encodeURIComponent(sessionId)
+                    : '/api/billing/status';
+                const response = await fetch(statusUrl, { credentials: 'same-origin' });
                 if (!response.ok) throw new Error('Could not load billing status.');
                 billing = await response.json();
                 renderBilling();
@@ -1066,15 +1148,16 @@
             trackEvent('subscription_started');
             showSuccessModal();
 
-            // The Stripe webhook is the source of truth; it writes Pro entitlement
-            // to SQLite. Poll the status endpoint until the write lands.
+            // Reconcile against Stripe / SQLite, forwarding sessionId so a
+            // post-redeploy container without the local checkout_sessions row
+            // can still look up the completed Checkout Session directly.
             for (let attempt = 0; attempt < 8; attempt += 1) {
-                const status = await refreshBilling();
+                const status = await refreshBilling(sessionId);
                 if (status && status.pro) {
                     finalizeProUpgrade();
                     return;
                 }
-                await sleep(2000);
+                await sleep((status && status.retry_after_ms) || 2000);
             }
 
             // Final fallback: reconcile synchronously against Stripe in case the
@@ -1407,6 +1490,91 @@
             closeLengthModal();
             processAudio(dialogue, music, true);
         });
+        if (modalRestoreBtn) {
+            modalRestoreBtn.addEventListener('click', () => {
+                closeLengthModal();
+                openRestoreModal();
+            });
+        }
+
+        function setRestoreError(message) {
+            if (!restoreError) return;
+            if (!message) {
+                restoreError.hidden = true;
+                restoreError.textContent = '';
+                return;
+            }
+            restoreError.textContent = message;
+            restoreError.hidden = false;
+        }
+
+        function openRestoreModal() {
+            if (!restoreModal) return;
+            setRestoreError(null);
+            restoreModal.hidden = false;
+            if (restoreEmail) restoreEmail.focus();
+        }
+
+        function closeRestoreModal() {
+            if (!restoreModal) return;
+            restoreModal.hidden = true;
+            setRestoreError(null);
+        }
+
+        if (restoreOpenBtn) restoreOpenBtn.addEventListener('click', openRestoreModal);
+        if (restoreCloseBtn) restoreCloseBtn.addEventListener('click', closeRestoreModal);
+        if (restoreCancelBtn) restoreCancelBtn.addEventListener('click', closeRestoreModal);
+        if (restoreModal) {
+            restoreModal.addEventListener('click', (event) => {
+                if (event.target === restoreModal) closeRestoreModal();
+            });
+        }
+        window.addEventListener('keydown', (event) => {
+            if (event.key !== 'Escape') return;
+            if (restoreModal && !restoreModal.hidden) closeRestoreModal();
+            else if (lengthModal && !lengthModal.hidden) closeLengthModal();
+        });
+
+        if (restoreForm) {
+            restoreForm.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                const email = restoreEmail ? restoreEmail.value.trim() : '';
+                if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+                    setRestoreError('Enter the email address used for your Stripe subscription.');
+                    if (restoreEmail) restoreEmail.focus();
+                    return;
+                }
+                setRestoreError(null);
+                if (restoreSubmitBtn) {
+                    restoreSubmitBtn.disabled = true;
+                    restoreSubmitBtn.textContent = 'Checking Stripe…';
+                }
+                try {
+                    const response = await fetch('/api/billing/restore', {
+                        method: 'POST',
+                        credentials: 'same-origin',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ email }),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(formatDetail(data.detail));
+                    }
+                    billing = data;
+                    renderBilling();
+                    closeRestoreModal();
+                    trackEvent('subscription_restored', { pro: true });
+                    notify('Pro subscription restored — unlimited exports and full-length tracks are unlocked.');
+                } catch (error) {
+                    setRestoreError(error && error.message ? error.message : 'Could not restore subscription.');
+                } finally {
+                    if (restoreSubmitBtn) {
+                        restoreSubmitBtn.disabled = false;
+                        restoreSubmitBtn.textContent = 'Restore Pro';
+                    }
+                }
+            });
+        }
 
         form.addEventListener('submit', async (event) => {
             event.preventDefault();
