@@ -2,3 +2,7 @@
 .duckit-data/
 __pycache__/
 *.pyc
+
+# Tailwind build tooling (.tailwind-build): sources are committed, outputs are not
+.tailwind-build/node_modules/
+.tailwind-build/*.log

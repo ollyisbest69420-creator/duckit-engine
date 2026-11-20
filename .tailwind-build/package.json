@@ -1,0 +1,12 @@
+{
+  "name": "duckit-css-build",
+  "version": "1.0.0",
+  "private": true,
+  "description": "One-off Tailwind build used to inline the production CSS into index.html (no CDN at runtime).",
+  "scripts": {
+    "build": "tailwindcss -c tailwind.config.js -i input.css -o out.css --minify"
+  },
+  "devDependencies": {
+    "tailwindcss": "3.4.17"
+  }
+}
